@@ -79,8 +79,9 @@ func TestPostureHistoryAPI(t *testing.T) {
 	if f.NodeID != "edge-1" {
 		t.Errorf("filter.NodeID=%q want=edge-1", f.NodeID)
 	}
-	if f.From.IsZero() || f.To.IsZero() {
-		t.Errorf("filter window zero: from=%v to=%v", f.From, f.To)
+	wantFrom, wantTo := now.Add(-3*time.Hour), now
+	if !f.From.Equal(wantFrom) || !f.To.Equal(wantTo) {
+		t.Errorf("filter window: from=%v want=%v to=%v want=%v", f.From, wantFrom, f.To, wantTo)
 	}
 
 	// 4. Default window: no from/to → From ≈1h ago, To non-zero.
@@ -94,5 +95,22 @@ func TestPostureHistoryAPI(t *testing.T) {
 	}
 	if elapsed := time.Since(f.From); elapsed < 30*time.Minute || elapsed > 2*time.Hour {
 		t.Errorf("default From=%v not ≈1h ago", f.From)
+	}
+	if f.Limit != 2880 {
+		t.Errorf("default Limit=%d want=2880", f.Limit)
+	}
+
+	// 5. Resolution-dependent limit caps, read back through the recorded filter.
+	for _, tc := range []struct {
+		resolution string
+		wantLimit  int
+	}{{"5s", 1920}, {"5min", 2016}} {
+		w = do("/api/nodes/posture/history?resolution=" + tc.resolution)
+		if w.Code != http.StatusOK {
+			t.Fatalf("resolution=%s: status=%d want=%d body=%s", tc.resolution, w.Code, http.StatusOK, w.Body)
+		}
+		if got := ms.nodePosture.lastFilter.Limit; got != tc.wantLimit {
+			t.Errorf("resolution=%s: Limit=%d want=%d", tc.resolution, got, tc.wantLimit)
+		}
 	}
 }
