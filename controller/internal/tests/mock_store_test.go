@@ -2374,11 +2374,11 @@ func (f *fakeNodePostureRepo) BulkInsert(_ context.Context, points []store.Postu
 	return nil
 }
 
-func (f *fakeNodePostureRepo) QueryHistory(_ context.Context, filter store.PostureFilter) ([]store.PosturePoint, error) {
+func (f *fakeNodePostureRepo) QueryHistory(ctx context.Context, filter store.PostureFilter) ([]store.PosturePoint, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lastFilter = filter
-	return nil, nil
+	return append([]store.PosturePoint(nil), f.inserted...), nil
 }
 
 type stubDynDetectRepo struct{}

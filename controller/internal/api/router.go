@@ -183,6 +183,7 @@ func NewRouter(deps Dependencies) *gin.Engine {
 		api.GET("/inline/mitigations", getInlineMitigations(deps))
 		api.POST("/inline/reconcile", requireAdminForWrites(), reconcileInline(deps))
 		api.GET("/nodes/posture", listNodePosture(deps))
+		api.GET("/nodes/posture/history", postureHistory(deps))
 		api.GET("/nodes/:id/posture", getNodePosture(deps))
 
 		// Mutual TLS posture for the node management drawer.

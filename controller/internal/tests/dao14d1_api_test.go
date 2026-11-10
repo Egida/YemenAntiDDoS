@@ -1162,6 +1162,7 @@ func TestDao14d1_G4Fixture(t *testing.T) {
 		"/api/l7/events":                            "/api/l7/events?limit=10",
 		"/api/nodes/:id/tls":                        "/api/nodes/dao14-n1/tls",
 		"/api/nodes/posture":                        "/api/nodes/posture",
+		"/api/nodes/posture/history":                "/api/nodes/posture/history",
 		"/api/nodes/:id/posture":                    "/api/nodes/dao14-n1/posture",
 		"/api/inline/mitigations":                   "/api/inline/mitigations",
 	}
@@ -1185,8 +1186,8 @@ func TestDao14d1_G4Fixture(t *testing.T) {
 			}
 		})
 	}
-	if count != 57 || count != len(paths) {
-		t.Fatalf("probed=%d inventory=%d want=57", count, len(paths))
+	if count != 58 || count != len(paths) {
+		t.Fatalf("probed=%d inventory=%d want=58", count, len(paths))
 	}
 	t.Logf("probed %d GET routes", count)
 }
