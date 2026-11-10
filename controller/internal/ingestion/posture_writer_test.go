@@ -31,7 +31,6 @@ func TestPostureWriterLastSampleWins(t *testing.T) {
 	defer cancel()
 	done := make(chan struct{})
 	go func() { w.Run(ctx); close(done) }()
-	time.Sleep(30 * time.Millisecond)
 	cancel()
 	select {
 	case <-done:
@@ -54,5 +53,60 @@ func TestPostureWriterLastSampleWins(t *testing.T) {
 	}
 	if byNode["edge-1"].Time.Location() != time.UTC {
 		t.Errorf("flush time must be UTC-truncated, got %v", byNode["edge-1"].Time)
+	}
+}
+
+func TestPostureWriterFieldMapping(t *testing.T) {
+	repo := &fakePostureRepo{}
+	w := NewPostureWriter(repo, 15*time.Second)
+	w.Enqueue("edge-m", &pb.StatsReport{Posture: &pb.NodePosture{
+		FilterRules:         1,
+		ValidatedClients:    2,
+		SynCookiesReply:     3,
+		SynCookiesValidated: 4,
+		SynCookiesDropped:   5,
+		EmergencyDrops:      6,
+		BurstAlerts:         7,
+		RedirectOk:          8,
+		RedirectErr:         9,
+		AfXdpActive:         true,
+		AfXdpUmemDrops:      10,
+		AfXdpRx:             11,
+	}})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { w.Run(ctx); close(done) }()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+
+	if len(repo.inserted) != 1 {
+		t.Fatalf("want 1 row, got %d", len(repo.inserted))
+	}
+	got := repo.inserted[0]
+	want := store.PosturePoint{
+		NodeID:              "edge-m",
+		FilterRules:         1,
+		ValidatedClients:    2,
+		SynCookiesReplied:   3,
+		SynCookiesValidated: 4,
+		SynCookiesDropped:   5,
+		EmergencyDrops:      6,
+		BurstAlerts:         7,
+		RedirectOk:          8,
+		RedirectErr:         9,
+		AFXDPActive:         true,
+		AFXDPUmemDrops:      10,
+		AFXDPRX:             11,
+	}
+	// Time is assigned at flush; zero it out for exact struct comparison.
+	got.Time = time.Time{}
+	if got != want {
+		t.Errorf("field mapping mismatch:\n got %+v\nwant %+v", got, want)
 	}
 }

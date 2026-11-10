@@ -80,14 +80,18 @@ func (w *PostureWriter) flush(ctx context.Context) {
 		return
 	}
 	batch := make([]store.PosturePoint, 0, len(w.pending))
+	// All points in one flush share the same timestamp (truncated to flush interval),
+	// matching DBWriter's flushTime pattern.
+	flushTime := time.Now().UTC().Truncate(w.interval)
 	for _, p := range w.pending {
-		p.Time = time.Now().UTC().Truncate(w.interval)
+		p.Time = flushTime
 		batch = append(batch, p)
 	}
 	w.pending = make(map[string]store.PosturePoint)
 	w.mu.Unlock()
 
 	if err := w.repo.BulkInsert(ctx, batch); err != nil {
+		// No requeue (unlike DBWriter): counters are cumulative and each report re-enqueues fresher data, so a dropped window only leaves a gap in history.
 		log.Printf("posture_writer: insert %d rows failed: %v", len(batch), err)
 	}
 }
