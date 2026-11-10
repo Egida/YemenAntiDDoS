@@ -1,6 +1,12 @@
-// Inline posture history: fetch + normalization for the Inline page chart.
-// Counters are cumulative; the chart wants per-second event rates, so buckets
-// are summed across nodes (or filtered to one) and turned into deltas.
+// Inline posture history: normalization for the Inline page chart.
+// Counters are cumulative; the chart wants per-second event rates. Deltas are
+// computed per node first — so one node's counter restart (clamped to 0) can
+// never hide its peers' events — then summed across nodes into per-timestamp
+// buckets.
+import type { Point } from '../../components/chart/math'
+
+export type { Point }
+
 export interface PostureRow {
   time: string
   node_id: string
@@ -18,8 +24,6 @@ export interface PostureRow {
   af_xdp_rx: number
 }
 
-export interface Point { time: number; values: Record<string, number> }
-
 const COUNTERS = ['emergency', 'cookies_ok', 'cookies_drop', 'umem'] as const
 
 function counterValue(r: PostureRow): Record<string, number> {
@@ -31,17 +35,16 @@ function counterValue(r: PostureRow): Record<string, number> {
   }
 }
 
-// posturePoints converts raw history rows into XChart points. nodeFilter ''
-// sums all nodes per bucket; a node id restricts to that node.
-export function posturePoints(rows: PostureRow[], nodeFilter: string): Point[] {
-  if (!rows.length) return []
-  const filtered = nodeFilter ? rows.filter(r => r.node_id === nodeFilter) : rows
+// Sum a node's rows per timestamp (same-timestamp samples coalesce), then walk
+// timestamps oldest→newest turning cumulative counters into per-second deltas.
+// First bucket is 0; a counter going backwards (node restart) clamps to 0.
+function nodeDeltaPoints(rows: PostureRow[]): Point[] {
   const byTime = new Map<number, Record<string, number>>()
-  for (const r of filtered) {
+  for (const r of rows) {
     const t = Date.parse(r.time)
     if (Number.isNaN(t)) continue
-    const acc = byTime.get(t)
     const vals = counterValue(r)
+    const acc = byTime.get(t)
     if (!acc) { byTime.set(t, vals); continue }
     for (const k of COUNTERS) acc[k] = (acc[k] ?? 0) + (vals[k] ?? 0)
   }
@@ -63,4 +66,28 @@ export function posturePoints(rows: PostureRow[], nodeFilter: string): Point[] {
     prevTime = t
   }
   return out
+}
+
+// posturePoints converts raw history rows into XChart points. nodeFilter ''
+// sums all nodes per bucket; a node id restricts to that node.
+export function posturePoints(rows: PostureRow[], nodeFilter: string): Point[] {
+  const filtered = nodeFilter ? rows.filter(r => r.node_id === nodeFilter) : rows
+  if (!filtered.length) return []
+  const byNode = new Map<string, PostureRow[]>()
+  for (const r of filtered) {
+    const list = byNode.get(r.node_id)
+    if (list) list.push(r)
+    else byNode.set(r.node_id, [r])
+  }
+  const merged = new Map<number, Record<string, number>>()
+  for (const nodeRows of byNode.values()) {
+    for (const p of nodeDeltaPoints(nodeRows)) {
+      const acc = merged.get(p.time)
+      if (!acc) { merged.set(p.time, { ...p.values }); continue }
+      for (const k of COUNTERS) acc[k] = (acc[k] ?? 0) + (p.values[k] ?? 0)
+    }
+  }
+  return [...merged.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([time, values]) => ({ time, values }))
 }
