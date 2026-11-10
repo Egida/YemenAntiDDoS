@@ -234,7 +234,7 @@ func (s *PGStore) AutoMigrate(ctx context.Context, ret RetentionConfig) error {
 			rows.Close()
 		}
 		if probeErr != nil {
-			s.hypertables = map[string]bool{"ts_stats": true, "flow_logs": true}
+			s.hypertables = map[string]bool{"ts_stats": true, "flow_logs": true, "ts_node_posture": true}
 			log.Printf("WARNING: hypertable probe failed: %v; preserving TimescaleDB cleanup ownership", probeErr)
 		}
 	}

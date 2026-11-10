@@ -529,7 +529,7 @@ func main() {
 	log.Printf("xsight-controller running (mode=%s)", cfg.Action.Mode)
 
 	// Data retention cleaner
-	if cfg.Retention.TSStatsDays > 0 || cfg.Retention.FlowLogsDays > 0 || cfg.Retention.AttacksDays > 0 || cfg.Retention.AuditLogDays > 0 {
+	if cfg.Retention.TSStatsDays > 0 || cfg.Retention.FlowLogsDays > 0 || cfg.Retention.AttacksDays > 0 || cfg.Retention.AuditLogDays > 0 || cfg.Retention.PostureHistoryDays > 0 {
 		cleaner := retention.New(db.Pool(), retention.Config{
 			TSStatsDays:        cfg.Retention.TSStatsDays,
 			FlowLogsDays:       cfg.Retention.FlowLogsDays,
@@ -542,8 +542,8 @@ func main() {
 			PostureHypertable:  db.IsHypertable("ts_node_posture"),
 		})
 		go cleaner.Run(ctx)
-		log.Printf("retention: ts_stats=%dd flow_logs=%dd attacks=%dd audit=%dd interval=%dh",
-			cfg.Retention.TSStatsDays, cfg.Retention.FlowLogsDays, cfg.Retention.AttacksDays, cfg.Retention.AuditLogDays, cfg.Retention.IntervalHours)
+		log.Printf("retention: ts_stats=%dd flow_logs=%dd attacks=%dd audit=%dd posture=%dd interval=%dh",
+			cfg.Retention.TSStatsDays, cfg.Retention.FlowLogsDays, cfg.Retention.AttacksDays, cfg.Retention.AuditLogDays, cfg.Retention.PostureHistoryDays, cfg.Retention.IntervalHours)
 	}
 
 	// Systemd watchdog: signal ready + start heartbeat
