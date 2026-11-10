@@ -65,6 +65,7 @@ type RetentionConfig struct {
 	FlowLogsDays         int `yaml:"flow_logs_days"`          // delete flow_logs older than N days (default 7); 0 = keep forever
 	FlowLogsCompressDays int `yaml:"flow_logs_compress_days"` // compress flow_logs older than N days (default 1); 0 = no compression policy
 	FlowLogsChunkDays    int `yaml:"flow_logs_chunk_days"`    // flow_logs chunk size in days (0 = auto: retention/7, floored to 1; clamped to <= retention)
+	PostureHistoryDays   int `yaml:"posture_history_days"`    // delete ts_node_posture older than N days (default 7); 0 = keep forever
 	AttacksDays          int `yaml:"attacks_days"`            // delete ended attacks older than N days (0 = keep forever)
 	AuditLogDays         int `yaml:"audit_log_days"`          // delete audit logs older than N days (0 = keep forever)
 	IntervalHours        int `yaml:"interval_hours"`          // how often to run cleanup (default 24 = once/day)
@@ -184,6 +185,7 @@ func Load(path string) (*Config, error) {
 			TSStatsCaggDays:      90,  // 90 days of aggregated data (default)
 			FlowLogsDays:         7,   // 7 days of flow logs (compressed)
 			FlowLogsCompressDays: 1,   // compress after 1 day
+			PostureHistoryDays:   7,   // 7 days of posture history (default)
 			AttacksDays:          90,  // 90 days of attack history
 			AuditLogDays:         180, // 180 days of audit trail
 			IntervalHours:        24,  // run cleanup once per day
@@ -284,6 +286,9 @@ func (c *Config) validate() error {
 	}
 	if c.Retention.FlowLogsDays < 0 {
 		return fmt.Errorf("retention.flow_logs_days must be >= 0, got %d", c.Retention.FlowLogsDays)
+	}
+	if c.Retention.PostureHistoryDays < 0 {
+		return fmt.Errorf("retention.posture_history_days must be >= 0, got %d", c.Retention.PostureHistoryDays)
 	}
 	if c.Retention.FlowLogsCompressDays < 0 {
 		return fmt.Errorf("retention.flow_logs_compress_days must be >= 0, got %d", c.Retention.FlowLogsCompressDays)

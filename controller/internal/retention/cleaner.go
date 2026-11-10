@@ -20,6 +20,8 @@ type Config struct {
 	IntervalHours      int
 	TSStatsHypertable  bool
 	FlowLogsHypertable bool
+	PostureHistoryDays int
+	PostureHypertable  bool
 }
 
 // Cleaner periodically deletes old data from the database.
@@ -69,6 +71,17 @@ func (c *Cleaner) cleanup(ctx context.Context) {
 			log.Printf("retention: ts_stats cleanup error: %v", err)
 		} else if n > 0 {
 			log.Printf("retention: ts_stats deleted %d rows older than %d days", n, c.cfg.TSStatsDays)
+			total += n
+		}
+	}
+
+	// ts_node_posture: skip row-delete when TimescaleDB manages retention via chunk policies
+	if c.cfg.PostureHistoryDays > 0 && !c.cfg.PostureHypertable {
+		n, err := c.deleteOld(ctx, "ts_node_posture", "time", c.cfg.PostureHistoryDays)
+		if err != nil {
+			log.Printf("retention: ts_node_posture cleanup error: %v", err)
+		} else if n > 0 {
+			log.Printf("retention: ts_node_posture deleted %d rows older than %d days", n, c.cfg.PostureHistoryDays)
 			total += n
 		}
 	}

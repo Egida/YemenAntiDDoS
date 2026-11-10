@@ -112,6 +112,7 @@ func main() {
 		FlowLogsDays:         cfg.Retention.FlowLogsDays,
 		FlowLogsCompressDays: cfg.Retention.FlowLogsCompressDays,
 		FlowLogsChunkDays:    cfg.Retention.FlowLogsChunkDays,
+		PostureHistoryDays:   cfg.Retention.PostureHistoryDays,
 	}); err != nil {
 		log.Fatalf("migrate: %v", err)
 	}
@@ -537,6 +538,8 @@ func main() {
 			IntervalHours:      cfg.Retention.IntervalHours,
 			TSStatsHypertable:  db.IsHypertable("ts_stats"),
 			FlowLogsHypertable: db.IsHypertable("flow_logs"),
+			PostureHistoryDays: cfg.Retention.PostureHistoryDays,
+			PostureHypertable:  db.IsHypertable("ts_node_posture"),
 		})
 		go cleaner.Run(ctx)
 		log.Printf("retention: ts_stats=%dd flow_logs=%dd attacks=%dd audit=%dd interval=%dh",

@@ -141,6 +141,7 @@ type RetentionConfig struct {
 	FlowLogsDays         int // flow_logs retention (default 7)
 	FlowLogsCompressDays int // flow_logs compression (default 1)
 	FlowLogsChunkDays    int // flow_logs chunk size in days (0 = auto)
+	PostureHistoryDays   int // ts_node_posture retention (default 7)
 }
 
 // AutoMigrate creates all tables if they don't exist.
@@ -218,7 +219,7 @@ func (s *PGStore) AutoMigrate(ctx context.Context, ret RetentionConfig) error {
 
 	s.hypertables = make(map[string]bool)
 	if s.hasTimescale {
-		rows, probeErr := s.pool.Query(ctx, "SELECT hypertable_name FROM timescaledb_information.hypertables WHERE hypertable_schema = current_schema() AND hypertable_name IN ('ts_stats','flow_logs')")
+		rows, probeErr := s.pool.Query(ctx, "SELECT hypertable_name FROM timescaledb_information.hypertables WHERE hypertable_schema = current_schema() AND hypertable_name IN ('ts_stats','flow_logs','ts_node_posture')")
 		if probeErr == nil {
 			for rows.Next() {
 				var table string
@@ -267,6 +268,11 @@ func (s *PGStore) AutoMigrate(ctx context.Context, ret RetentionConfig) error {
 		s.applyCompressionPolicy(ctx, "flow_logs", ret.FlowLogsCompressDays)
 	} else if s.IsHypertable("flow_logs") {
 		s.removeCompressionPolicy(ctx, "flow_logs")
+	}
+	if ret.PostureHistoryDays > 0 {
+		s.applyRetentionPolicy(ctx, "ts_node_posture", ret.PostureHistoryDays)
+	} else if s.IsHypertable("ts_node_posture") {
+		s.removeRetentionPolicy(ctx, "ts_node_posture")
 	}
 
 	// Chunk sizing. The default chunk_time_interval is 7 days, which makes short
