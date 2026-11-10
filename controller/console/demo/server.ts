@@ -246,14 +246,15 @@ export function createServer(data: Dataset = createData()): Server {
       cleanpipe_egress: n.id === 'probe-a' ? 'eth1' : '', updated_at: n.last_stats_at })
     if (path === '/api/nodes/posture') return send(Object.fromEntries(
       data.nodes.filter(n => n.mode === 'xdp').map(n => [n.id, posture(n)])))
-    // Posture history mirrors Go's default window: the last hour of 1min buckets.
+    // Posture history: 25 one-minute buckets — a slice of Go's default last-hour
+    // window, enough for the chart demo. Counters are non-decreasing so deltas chart.
     if (path === '/api/nodes/posture/history') {
       const rows: Row[] = []
       for (let i = 24; i >= 0; i--) {
         const t = new Date(data.now - i * 60000).toISOString(), base = (24 - i) * 3
         rows.push({ time: t, node_id: 'probe-a', filter_rules: 2, validated_clients: 40 + base,
           syn_cookies_replied: 120 + base * 2, syn_cookies_validated: 100 + base * 2,
-          syn_cookies_dropped: 12 + (i % 3), emergency_drops: i > 18 ? (i - 18) * 250 : 0,
+          syn_cookies_dropped: 12 + (24 - i), emergency_drops: i >= 18 ? (24 - i) * 250 : 1500,
           burst_alerts: i > 18 ? 2 : 0, redirect_ok: 500 + base, redirect_err: 0,
           af_xdp_active: true, af_xdp_umem_drops: 0, af_xdp_rx: 90000 + base * 100 })
       }
