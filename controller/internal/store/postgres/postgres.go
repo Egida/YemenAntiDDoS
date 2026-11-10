@@ -17,18 +17,19 @@ import (
 type PGStore struct {
 	pool *pgxpool.Pool
 
-	nodes      *nodeRepo
-	prefixes   *prefixRepo
-	templates  *templateRepo
-	thresholds *thresholdRepo
-	responses  *responseRepo
-	attacks    *attackRepo
-	actionsLog *actionsLogRepo
-	users      *userRepo
-	webhooks   *webhookRepo
-	auditLog   *auditLogRepo
-	stats      *statsRepo
-	dynDetect  *dynDetectRepo
+	nodes       *nodeRepo
+	prefixes    *prefixRepo
+	templates   *templateRepo
+	thresholds  *thresholdRepo
+	responses   *responseRepo
+	attacks     *attackRepo
+	actionsLog  *actionsLogRepo
+	users       *userRepo
+	webhooks    *webhookRepo
+	auditLog    *auditLogRepo
+	stats       *statsRepo
+	nodePosture *nodePostureRepo
+	dynDetect   *dynDetectRepo
 
 	// Response System v2 connectors
 	webhookConnectors *webhookConnectorRepo
@@ -72,6 +73,7 @@ func New(ctx context.Context, dsn string) (*PGStore, error) {
 	s.webhooks = &webhookRepo{pool: pool}
 	s.auditLog = &auditLogRepo{pool: pool}
 	s.stats = &statsRepo{pool: pool}
+	s.nodePosture = &nodePostureRepo{pool: pool}
 	s.dynDetect = &dynDetectRepo{pool: pool}
 	s.webhookConnectors = &webhookConnectorRepo{pool: pool}
 	s.xdropConnectors = &xdropConnectorRepo{pool: pool}
@@ -101,6 +103,7 @@ func (s *PGStore) Users() store.UserRepo                           { return s.us
 func (s *PGStore) Webhooks() store.WebhookRepo                     { return s.webhooks }
 func (s *PGStore) AuditLog() store.AuditLogRepo                    { return s.auditLog }
 func (s *PGStore) Stats() store.StatsRepo                          { return s.stats }
+func (s *PGStore) NodePosture() store.NodePostureRepo              { return s.nodePosture }
 func (s *PGStore) DynDetect() store.DynDetectRepo                  { return s.dynDetect }
 
 // Response System v2 connectors
@@ -961,6 +964,27 @@ var migrations = []string{
 	// SYN BPS fixed column, matching the frag_bps migration.
 	`DO $$ BEGIN ALTER TABLE ts_stats ADD COLUMN tcp_syn_bps BIGINT DEFAULT 0; EXCEPTION WHEN duplicate_column THEN NULL; END $$`,
 
+	// v4.1: inline posture history (spec 2026-11-10 §A). Counters are cumulative;
+	// af_xdp_active tracks socket health. Plain table; hypertable applied
+	// separately when TimescaleDB is available.
+	`CREATE TABLE IF NOT EXISTS ts_node_posture (
+		time                 TIMESTAMPTZ NOT NULL,
+		node_id              TEXT NOT NULL,
+		filter_rules         BIGINT DEFAULT 0,
+		validated_clients    BIGINT DEFAULT 0,
+		syn_cookies_replied  BIGINT DEFAULT 0,
+		syn_cookies_validated BIGINT DEFAULT 0,
+		syn_cookies_dropped  BIGINT DEFAULT 0,
+		emergency_drops      BIGINT DEFAULT 0,
+		burst_alerts         BIGINT DEFAULT 0,
+		redirect_ok          BIGINT DEFAULT 0,
+		redirect_err         BIGINT DEFAULT 0,
+		af_xdp_active        BOOLEAN DEFAULT FALSE,
+		af_xdp_umem_drops    BIGINT DEFAULT 0,
+		af_xdp_rx            BIGINT DEFAULT 0
+	)`,
+	`CREATE INDEX IF NOT EXISTS ts_node_posture_node_time ON ts_node_posture (node_id, time DESC)`,
+
 	// v1.3 Phase 1c.2/1c.3 REVERTED (2026-04-20): SYN cookie scope removed after
 	// architectural reassessment — xSight's scrub-and-return (ingress-only) xdrop
 	// topology cannot support stateless SYN cookie without synproxy-style state
@@ -1546,4 +1570,7 @@ var timescaleMigrations = []string{
 		timescaledb.compress_segmentby = 'dst_ip',
 		timescaledb.compress_orderby = 'time DESC'
 	)`,
+
+	// v4.1: posture history hypertable
+	`SELECT create_hypertable('ts_node_posture', 'time', if_not_exists => TRUE)`,
 }

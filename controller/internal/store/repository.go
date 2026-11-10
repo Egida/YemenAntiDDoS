@@ -26,6 +26,7 @@ type Store interface {
 	Webhooks() WebhookRepo
 	AuditLog() AuditLogRepo
 	Stats() StatsRepo
+	NodePosture() NodePostureRepo
 	DynDetect() DynDetectRepo
 	// Response System v2 connectors
 	WebhookConnectors() WebhookConnectorRepo
@@ -601,4 +602,38 @@ type StatsRepo interface {
 	// QueryWindowP95 computes P95 PPS/BPS from ts_stats for a rolling window [end-duration, end).
 	// minPoints: minimum data points required (SQL HAVING filter).
 	QueryWindowP95(ctx context.Context, end time.Time, duration time.Duration, minPoints int) ([]P95Result, error)
+}
+
+// PostureFilter selects a posture-history window.
+type PostureFilter struct {
+	NodeID     string
+	From       time.Time
+	To         time.Time
+	Resolution string // "5s" | "1min" | "5min" (maps to time_bucket widths)
+	Limit      int
+}
+
+// PosturePoint is one bucketed posture-history sample. Counters are cumulative
+// (bucket max), matching how the node reports them.
+type PosturePoint struct {
+	Time                time.Time `json:"time"`
+	NodeID              string    `json:"node_id"`
+	FilterRules         uint64    `json:"filter_rules"`
+	ValidatedClients    uint64    `json:"validated_clients"`
+	SynCookiesReplied   uint64    `json:"syn_cookies_replied"`
+	SynCookiesValidated uint64    `json:"syn_cookies_validated"`
+	SynCookiesDropped   uint64    `json:"syn_cookies_dropped"`
+	EmergencyDrops      uint64    `json:"emergency_drops"`
+	BurstAlerts         uint64    `json:"burst_alerts"`
+	RedirectOk          uint64    `json:"redirect_ok"`
+	RedirectErr         uint64    `json:"redirect_err"`
+	AFXDPActive         bool      `json:"af_xdp_active"`
+	AFXDPUmemDrops      uint64    `json:"af_xdp_umem_drops"`
+	AFXDPRX             uint64    `json:"af_xdp_rx"`
+}
+
+// NodePostureRepo persists and queries the ts_node_posture history.
+type NodePostureRepo interface {
+	BulkInsert(ctx context.Context, points []PosturePoint) error
+	QueryHistory(ctx context.Context, filter PostureFilter) ([]PosturePoint, error)
 }

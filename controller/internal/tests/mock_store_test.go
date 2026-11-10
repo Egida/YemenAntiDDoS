@@ -63,6 +63,7 @@ type MockStore struct {
 	webhookRepo           stubWebhookRepo
 	auditLogRepo          stubAuditLogRepo
 	statsRepo             stubStatsRepo
+	nodePosture           fakeNodePostureRepo
 	dynDetectRepo         stubDynDetectRepo
 	webhookConnectorRepo  stubWebhookConnectorRepo
 	shellConnectorRepo    stubShellConnectorRepo
@@ -205,6 +206,7 @@ func (m *MockStore) Users() store.UserRepo                           { return m.
 func (m *MockStore) Webhooks() store.WebhookRepo                     { return m.webhookRepo }
 func (m *MockStore) AuditLog() store.AuditLogRepo                    { return m.auditLogRepo }
 func (m *MockStore) Stats() store.StatsRepo                          { return m.statsRepo }
+func (m *MockStore) NodePosture() store.NodePostureRepo              { return &m.nodePosture }
 func (m *MockStore) DynDetect() store.DynDetectRepo                  { return m.dynDetectRepo }
 func (m *MockStore) WebhookConnectors() store.WebhookConnectorRepo   { return m.webhookConnectorRepo }
 func (m *MockStore) XDropConnectors() store.XDropConnectorRepo       { return m.xdropConnectors }
@@ -2354,6 +2356,28 @@ func (stubStatsRepo) QueryHourP95(_ context.Context, _, _ time.Time, _ int) ([]s
 	return nil, nil
 }
 func (stubStatsRepo) QueryWindowP95(_ context.Context, _ time.Time, _ time.Duration, _ int) ([]store.P95Result, error) {
+	return nil, nil
+}
+
+// fakeNodePostureRepo is an in-memory fake for the ts_node_posture repo:
+// BulkInsert records the points, QueryHistory records the last filter.
+type fakeNodePostureRepo struct {
+	mu         sync.Mutex
+	inserted   []store.PosturePoint
+	lastFilter store.PostureFilter
+}
+
+func (f *fakeNodePostureRepo) BulkInsert(_ context.Context, points []store.PosturePoint) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.inserted = append(f.inserted, points...)
+	return nil
+}
+
+func (f *fakeNodePostureRepo) QueryHistory(_ context.Context, filter store.PostureFilter) ([]store.PosturePoint, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastFilter = filter
 	return nil, nil
 }
 
