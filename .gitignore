@@ -90,3 +90,6 @@ internal_docs/
 # Host packages / host-specific config
 *.deb
 hsflowd.conf
+
+# git worktrees
+.worktrees/
