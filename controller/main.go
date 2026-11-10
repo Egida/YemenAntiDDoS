@@ -140,6 +140,9 @@ func main() {
 	dbWriter := ingestion.NewDBWriter(rings, db.Stats(), 5*time.Second)
 	go dbWriter.Run(ctx)
 
+	postureWriter := ingestion.NewPostureWriter(db.NodePosture(), 15*time.Second)
+	go postureWriter.Run(ctx)
+
 	// --- Phase 3: Detection engine ---
 
 	// 3.1 Threshold inheritance tree
@@ -348,6 +351,7 @@ func main() {
 	onStats := func(nodeID string, report *pb.StatsReport) {
 		statsWriter.HandleStats(nodeID, report)
 		dbWriter.Enqueue(reportToStatPoints(nodeID, report))
+		postureWriter.Enqueue(nodeID, report)
 		flowWriter.HandleFlows(nodeID, report)
 
 		// Store flow metrics for API exposure
