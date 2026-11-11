@@ -94,11 +94,24 @@ func encodeFlowspec(rule flowspec.Rule) (key string, nlri bgp.AddrPrefixInterfac
 		// float32 here loses nothing that survives the wire format.
 		rate = float32(rule.RateLimit) // Rule.RateLimit is bytes/sec, RFC 8955's unit
 	}
-	attrs = []bgp.PathAttributeInterface{
-		bgp.NewPathAttributeExtendedCommunities([]bgp.ExtendedCommunityInterface{
-			bgp.NewTrafficRateExtended(0, rate),
-		}),
+	communities := bgp.NewPathAttributeExtendedCommunities([]bgp.ExtendedCommunityInterface{
+		bgp.NewTrafficRateExtended(0, rate),
+	})
+	// RFC 8955 §4: flowspec receivers ignore next-hop, but gobgp's API layer
+	// still requires one (api2Path) plus Origin (fixupApiPath) on non-withdraw
+	// paths. NEXT_HOP is the only carrier that survives the API marshal round
+	// trip for flowspec SAFIs (MpReach next-hops are stripped there, and an
+	// empty-NLRI MpReach is rejected); api2Path consumes the NEXT_HOP attr and
+	// re-marshals the NLRI as MP_REACH with zero-length next-hop internally.
+	nh := "0.0.0.0"
+	if family == "fs6" {
+		nh = "::"
 	}
+	attrs = append(attrs,
+		bgp.NewPathAttributeOrigin(bgp.BGP_ORIGIN_ATTR_TYPE_IGP),
+		bgp.NewPathAttributeNextHop(nh),
+		communities,
+	)
 	if family == "fs4" {
 		nlri = bgp.NewFlowSpecIPv4Unicast(rules)
 	} else {

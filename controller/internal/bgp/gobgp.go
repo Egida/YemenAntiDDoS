@@ -24,21 +24,31 @@ const speakerTimeout = 30 * time.Second
 type GobgpSpeaker struct {
 	cfg Config
 
-	mu     sync.Mutex
-	srv    *server.BgpServer
-	uuids  map[string][]byte // pathKey -> AddPath uuid
-	peers  map[int]Peer      // connectorID -> last synced peer
-	stop   sync.Once
-	stopCh chan struct{}
+	mu        sync.Mutex
+	srv       *server.BgpServer
+	uuids     map[string][]byte // pathKey -> AddPath uuid
+	peers     map[int]Peer      // connectorID -> last synced peer
+	peerGauge map[string]bool   // BGPPeerUp label pairs ("conn|neighbor") currently exported
+	stop      sync.Once
+	stopCh    chan struct{}
 }
 
 func NewGobgp(cfg Config) *GobgpSpeaker {
 	return &GobgpSpeaker{
-		cfg:    cfg,
-		uuids:  map[string][]byte{},
-		peers:  map[int]Peer{},
-		stopCh: make(chan struct{}),
+		cfg:       cfg,
+		uuids:     map[string][]byte{},
+		peers:     map[int]Peer{},
+		peerGauge: map[string]bool{},
+		stopCh:    make(chan struct{}),
 	}
+}
+
+// server returns the live BGP server (nil until Start succeeds). Every read
+// goes through here so the poll goroutine never races Start/Stop writes.
+func (s *GobgpSpeaker) server() *server.BgpServer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.srv
 }
 
 // NextHop resolves the RTBH origination next-hop once, at construction time.
@@ -53,20 +63,42 @@ func (c Config) NextHop() (string, error) {
 	return nh, nil
 }
 
+// Start brings up the embedded speaker. ctx is accepted for interface
+// compliance and not used: lifecycle calls run synchronously under the
+// internal speaker timeout instead.
 func (s *GobgpSpeaker) Start(_ context.Context) error {
 	if _, err := s.cfg.NextHop(); err != nil {
 		return err
 	}
+	// Reset lifecycle state so Start-after-Stop works: a consumed sync.Once
+	// and a closed stopCh would otherwise break the next start/stop cycle.
+	s.mu.Lock()
+	s.stopCh = make(chan struct{})
+	s.stop = sync.Once{}
+	s.uuids = map[string][]byte{}
+	s.peers = map[int]Peer{}
+	s.peerGauge = map[string]bool{}
+	s.mu.Unlock()
 	srv := server.NewBgpServer()
 	go srv.Serve()
 	ctx, cancel := context.WithTimeout(context.Background(), speakerTimeout)
 	defer cancel()
-	if err := srv.StartBgp(ctx, &api.StartBgpRequest{Global: &api.Global{
-		Asn:             s.cfg.LocalASN,
-		RouterId:        s.cfg.RouterID,
-		ListenPort:      s.cfg.ListenPort,
-		ListenAddresses: []string{"0.0.0.0", "::"},
-	}}); err != nil {
+	global := &api.Global{
+		Asn:      s.cfg.LocalASN,
+		RouterId: s.cfg.RouterID,
+	}
+	if s.cfg.ListenPort > 0 {
+		global.ListenPort = s.cfg.ListenPort
+		global.ListenAddresses = []string{"0.0.0.0", "::"}
+	} else {
+		// gobgp rewrites port 0 to 179 AND an empty address list to
+		// 0.0.0.0/:: (oc.SetDefaultGlobalConfigValues), then binds every
+		// address — port 0 cannot express "no listener". A negative port
+		// survives the defaulting and fails the > 0 listener check, keeping
+		// the speaker outbound-only per the Config contract.
+		global.ListenPort = -1
+	}
+	if err := srv.StartBgp(ctx, &api.StartBgpRequest{Global: global}); err != nil {
 		return fmt.Errorf("bgp: start speaker: %w", err)
 	}
 	s.mu.Lock()
@@ -76,19 +108,19 @@ func (s *GobgpSpeaker) Start(_ context.Context) error {
 	return nil
 }
 
+// Stop shuts the speaker down. ctx is accepted for interface compliance and
+// not used (see Start).
 func (s *GobgpSpeaker) Stop(_ context.Context) error {
 	s.stop.Do(func() { close(s.stopCh) })
-	s.mu.Lock()
-	srv := s.srv
-	s.mu.Unlock()
+	srv := s.server()
 	if srv != nil {
 		srv.Stop()
 	}
 	return nil
 }
 
-// peerFamilies returns the unicast + flowspec families for the peer's AF.
-// Pointers keep vet's lock-copy check happy (protobuf messages embed mutexes).
+// peerFamilies returns the unicast + flowspec families for the peer's AF,
+// as pointers because that is the generated API element type.
 func peerFamilies(af string) []*api.Family {
 	if af == "ipv6" {
 		return []*api.Family{
@@ -102,14 +134,25 @@ func peerFamilies(af string) []*api.Family {
 	}
 }
 
+// effectiveAF resolves "auto" by parsing the neighbor address; an IPv4-mapped
+// IPv6 literal (::ffff:a.b.c.d) counts as IPv4.
 func effectiveAF(p Peer) string {
 	if p.AddressFamily == "auto" {
-		if strings.Contains(p.NeighborIP, ":") {
+		if ip := net.ParseIP(p.NeighborIP); ip != nil && ip.To4() == nil {
 			return "ipv6"
 		}
 		return "ipv4"
 	}
 	return p.AddressFamily
+}
+
+// normalizeAddr canonicalizes a neighbor address so "2001:DB8::1" and
+// "2001:db8::1" cannot be treated as two different peers and flap sessions.
+func normalizeAddr(s string) string {
+	if ip := net.ParseIP(strings.TrimSpace(s)); ip != nil {
+		return ip.String()
+	}
+	return s
 }
 
 func (s *GobgpSpeaker) addPeer(ctx context.Context, p Peer) error {
@@ -119,7 +162,7 @@ func (s *GobgpSpeaker) addPeer(ctx context.Context, p Peer) error {
 			Family: &api.Family{Afi: f.Afi, Safi: f.Safi}, Enabled: true,
 		}})
 	}
-	err := s.srv.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+	err := s.server().AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
 		Conf: &api.PeerConf{
 			NeighborAddress: p.NeighborIP,
 			PeerAsn:         p.NeighborASN,
@@ -147,12 +190,18 @@ func (s *GobgpSpeaker) SyncPeers(ctx context.Context, peers []Peer) error {
 		if strings.TrimSpace(p.NeighborIP) == "" || p.NeighborASN == 0 {
 			continue // rows without peering details stay inert (fail-closed)
 		}
-		desired[p.NeighborIP] = p
+		desired[normalizeAddr(p.NeighborIP)] = p
 	}
 	existing := map[string]bool{}
-	_ = s.srv.ListPeer(cctx, &api.ListPeerRequest{}, func(p *api.Peer) {
-		existing[p.Conf.GetNeighborAddress()] = true
-	})
+	if err := s.server().ListPeer(cctx, &api.ListPeerRequest{}, func(p *api.Peer) {
+		existing[normalizeAddr(p.Conf.GetNeighborAddress())] = true
+	}); err != nil {
+		metrics.BGPSpeakerErrors.Inc()
+		return fmt.Errorf("bgp: list peers: %w", err)
+	}
+	// Duplicate ConnectorIDs, or the same neighbor listed under two
+	// connectors, collapse last-writer-wins for console attribution only;
+	// the session config sent to gobgp remains correct.
 	for addr, p := range desired {
 		if old, ok := s.peers[p.ConnectorID]; ok && existing[addr] &&
 			old.NeighborASN == p.NeighborASN && old.MD5Password == p.MD5Password &&
@@ -160,7 +209,7 @@ func (s *GobgpSpeaker) SyncPeers(ctx context.Context, peers []Peer) error {
 			continue
 		}
 		if existing[addr] {
-			if err := s.srv.DeletePeer(cctx, &api.DeletePeerRequest{Address: addr}); err != nil {
+			if err := s.server().DeletePeer(cctx, &api.DeletePeerRequest{Address: addr}); err != nil {
 				metrics.BGPSpeakerErrors.Inc()
 				return fmt.Errorf("bgp: replace peer %s: %w", addr, err)
 			}
@@ -171,7 +220,7 @@ func (s *GobgpSpeaker) SyncPeers(ctx context.Context, peers []Peer) error {
 	}
 	for addr := range existing {
 		if _, ok := desired[addr]; !ok {
-			if err := s.srv.DeletePeer(cctx, &api.DeletePeerRequest{Address: addr}); err != nil {
+			if err := s.server().DeletePeer(cctx, &api.DeletePeerRequest{Address: addr}); err != nil {
 				metrics.BGPSpeakerErrors.Inc()
 				return fmt.Errorf("bgp: delete peer %s: %w", addr, err)
 			}
@@ -193,19 +242,21 @@ func (s *GobgpSpeaker) PeerStates(ctx context.Context) []PeerState {
 	s.mu.Lock()
 	byAddr := map[string]Peer{}
 	for _, p := range s.peers {
-		byAddr[p.NeighborIP] = p
+		byAddr[normalizeAddr(p.NeighborIP)] = p
 	}
 	s.mu.Unlock()
 	out := []PeerState{}
-	_ = s.srv.ListPeer(cctx, &api.ListPeerRequest{}, func(p *api.Peer) {
-		addr := p.Conf.GetNeighborAddress()
+	if err := s.server().ListPeer(cctx, &api.ListPeerRequest{}, func(p *api.Peer) {
+		addr := normalizeAddr(p.Conf.GetNeighborAddress())
 		st := PeerState{NeighborIP: addr, SessionUp: p.State.GetSessionState() == api.PeerState_ESTABLISHED}
 		if peer, ok := byAddr[addr]; ok {
 			st.ConnectorID = peer.ConnectorID
 			st.Name = peer.Name
 		}
 		out = append(out, st)
-	})
+	}); err != nil {
+		metrics.BGPSpeakerErrors.Inc()
+	}
 	return out
 }
 
@@ -223,45 +274,44 @@ func (s *GobgpSpeaker) pollLoop() {
 	}
 }
 
-// pollOnce refreshes peer gauges and locally-originated path counts.
+// pollOnce refreshes peer gauges and retires series for peers that went
+// away. Path gauges are maintained at mutation time (addPath/deletePath):
+// gobgp's ListPath API never populates path UUIDs, so a polled count cannot
+// distinguish locally-originated paths from learned ones.
 func (s *GobgpSpeaker) pollOnce() {
 	ctx, cancel := context.WithTimeout(context.Background(), speakerTimeout)
 	defer cancel()
+	current := map[string]bool{} // exported label pairs, "conn|neighbor"
 	for _, st := range s.PeerStates(ctx) {
+		conn := fmt.Sprintf("%d", st.ConnectorID)
+		current[conn+"|"+st.NeighborIP] = true
 		v := 0.0
 		if st.SessionUp {
 			v = 1
 		}
-		metrics.BGPPeerUp.WithLabelValues(fmt.Sprintf("%d", st.ConnectorID), st.NeighborIP).Set(v)
+		metrics.BGPPeerUp.WithLabelValues(conn, st.NeighborIP).Set(v)
 	}
-	families := map[string]*api.Family{
-		"rtbh":     {Afi: api.Family_AFI_IP, Safi: api.Family_SAFI_UNICAST},
-		"flowspec": {Afi: api.Family_AFI_IP, Safi: api.Family_SAFI_FLOW_SPEC_UNICAST},
+	s.mu.Lock()
+	known := s.peerGauge
+	s.peerGauge = current
+	s.mu.Unlock()
+	// Retire every pair the previous poll exported that this one doesn't:
+	// deleted peers (or peers re-attributed to a different connector) would
+	// otherwise keep their last gauge value forever.
+	for pair := range known {
+		if !current[pair] {
+			conn, neighbor, _ := strings.Cut(pair, "|")
+			metrics.BGPPeerUp.DeleteLabelValues(conn, neighbor)
+		}
 	}
-	// IPv6 counts fold into the same kinds via a second pass.
-	families["rtbh6"] = &api.Family{Afi: api.Family_AFI_IP6, Safi: api.Family_SAFI_UNICAST}
-	families["flowspec6"] = &api.Family{Afi: api.Family_AFI_IP6, Safi: api.Family_SAFI_FLOW_SPEC_UNICAST}
+}
 
-	counts := map[string]float64{"rtbh": 0, "flowspec": 0}
-	for kind, fam := range families {
-		kindKey := strings.TrimSuffix(kind, "6")
-		n := 0
-		_ = s.srv.ListPath(ctx, &api.ListPathRequest{
-			TableType: api.TableType_GLOBAL,
-			Name:      "global",
-			Family:    &api.Family{Afi: fam.Afi, Safi: fam.Safi},
-		}, func(dest *api.Destination) {
-			for _, p := range dest.Paths {
-				if len(p.Uuid) > 0 { // only locally-originated (AddPath) paths carry a uuid
-					n++
-				}
-			}
-		})
-		counts[kindKey] += float64(n)
+// pathKind maps a path key to its BGPPaths gauge label.
+func pathKind(key string) string {
+	if strings.HasPrefix(key, "rtbh") {
+		return "rtbh"
 	}
-	for kind, v := range counts {
-		metrics.BGPPaths.WithLabelValues(kind).Set(v)
-	}
+	return "flowspec"
 }
 
 // announce/withdraw primitives shared by the four public path methods.
@@ -272,7 +322,7 @@ func (s *GobgpSpeaker) addPath(ctx context.Context, key string, nlri bgp.AddrPre
 	}
 	cctx, cancel := context.WithTimeout(ctx, speakerTimeout)
 	defer cancel()
-	resp, err := s.srv.AddPath(cctx, &api.AddPathRequest{TableType: api.TableType_GLOBAL, Path: apiPath})
+	resp, err := s.server().AddPath(cctx, &api.AddPathRequest{TableType: api.TableType_GLOBAL, Path: apiPath})
 	if err != nil {
 		metrics.BGPSpeakerErrors.Inc()
 		return fmt.Errorf("bgp: add path: %w", err)
@@ -280,6 +330,7 @@ func (s *GobgpSpeaker) addPath(ctx context.Context, key string, nlri bgp.AddrPre
 	s.mu.Lock()
 	s.uuids[key] = resp.Uuid
 	s.mu.Unlock()
+	metrics.BGPPaths.WithLabelValues(pathKind(key)).Inc()
 	return nil
 }
 
@@ -292,20 +343,50 @@ func (s *GobgpSpeaker) deletePath(ctx context.Context, key string, nlri bgp.Addr
 	s.mu.Unlock()
 	var err error
 	if len(uuid) > 0 {
-		err = s.srv.DeletePath(cctx, &api.DeletePathRequest{TableType: api.TableType_GLOBAL, Uuid: uuid})
+		err = s.server().DeletePath(cctx, &api.DeletePathRequest{TableType: api.TableType_GLOBAL, Uuid: uuid})
 	} else {
 		// UUID lost (speaker restarted mid-flight): delete by exact NLRI.
 		wd, werr := apiutil.NewPath(nlri, true, attrs, time.Now())
 		if werr != nil {
 			return fmt.Errorf("bgp: marshal withdraw path: %w", werr)
 		}
-		err = s.srv.DeletePath(cctx, &api.DeletePathRequest{TableType: api.TableType_GLOBAL, Path: wd})
+		err = s.server().DeletePath(cctx, &api.DeletePathRequest{TableType: api.TableType_GLOBAL, Path: wd})
 	}
 	if err != nil {
 		metrics.BGPSpeakerErrors.Inc()
 		return fmt.Errorf("bgp: delete path: %w", err)
 	}
+	metrics.BGPPaths.WithLabelValues(pathKind(key)).Dec()
 	return nil
+}
+
+// checkNextHopFamily rejects an IPv6 rtbh next-hop for an IPv4 route. The
+// inverse (IPv4 next-hop on an IPv6 route) is fine: encodeBlackhole falls
+// back to "::" and gobgp rewrites it per-peer as next-hop-self.
+func checkNextHopFamily(prefix, nh string) error {
+	pfxIP, _, err := parsePrefix(prefix)
+	if err != nil {
+		return err
+	}
+	if net.ParseIP(nh).To4() == nil {
+		if pfx := net.ParseIP(pfxIP.String()); pfx != nil && pfx.To4() != nil {
+			return fmt.Errorf("bgp: rtbh next-hop %q is IPv6 but route %q is IPv4", nh, prefix)
+		}
+	}
+	return nil
+}
+
+// encodeBlackholeChecked resolves and validates the RTBH next-hop, then
+// encodes the blackhole origination for prefix.
+func (s *GobgpSpeaker) encodeBlackholeChecked(prefix string) (key string, nlri bgp.AddrPrefixInterface, attrs []bgp.PathAttributeInterface, err error) {
+	nh, err := s.cfg.NextHop()
+	if err != nil {
+		return "", nil, nil, err
+	}
+	if err := checkNextHopFamily(prefix, nh); err != nil {
+		return "", nil, nil, err
+	}
+	return encodeBlackhole(prefix, nh)
 }
 
 func (s *GobgpSpeaker) AnnounceFlowspec(ctx context.Context, rule flowspec.Rule) error {
@@ -325,11 +406,7 @@ func (s *GobgpSpeaker) WithdrawFlowspec(ctx context.Context, rule flowspec.Rule)
 }
 
 func (s *GobgpSpeaker) AnnounceBlackhole(ctx context.Context, prefix string) error {
-	nh, err := s.cfg.NextHop()
-	if err != nil {
-		return err
-	}
-	key, nlri, attrs, err := encodeBlackhole(prefix, nh)
+	key, nlri, attrs, err := s.encodeBlackholeChecked(prefix)
 	if err != nil {
 		return err
 	}
@@ -337,11 +414,7 @@ func (s *GobgpSpeaker) AnnounceBlackhole(ctx context.Context, prefix string) err
 }
 
 func (s *GobgpSpeaker) WithdrawBlackhole(ctx context.Context, prefix string) error {
-	nh, err := s.cfg.NextHop()
-	if err != nil {
-		return err
-	}
-	key, nlri, attrs, err := encodeBlackhole(prefix, nh)
+	key, nlri, attrs, err := s.encodeBlackholeChecked(prefix)
 	if err != nil {
 		return err
 	}

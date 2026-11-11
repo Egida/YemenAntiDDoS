@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/osrg/gobgp/v3/pkg/packet/bgp"
+
 	"github.com/d80y6/YemenDDoS/controller/internal/action/flowspec"
 )
 
@@ -89,31 +91,57 @@ func TestEncodeFlowspecRateLimitCommunity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	// The only attribute is ext-communities with traffic-rate 1e6 B/s.
-	if len(attrs) != 1 {
-		t.Fatalf("attrs = %d, want 1", len(attrs))
+	// Attr type sequence must be Origin(1), NextHop(3), ExtCommunities(16):
+	// gobgp's API layer requires Origin + a next-hop on non-withdraw paths.
+	if len(attrs) != 3 {
+		t.Fatalf("attrs = %d, want 3", len(attrs))
 	}
-	serialized, err := attrs[0].Serialize()
+	wantTypes := []bgp.BGPAttrType{
+		bgp.BGP_ATTR_TYPE_ORIGIN,
+		bgp.BGP_ATTR_TYPE_NEXT_HOP,
+		bgp.BGP_ATTR_TYPE_EXTENDED_COMMUNITIES,
+	}
+	for i, a := range attrs {
+		if got := a.GetType(); got != wantTypes[i] {
+			t.Fatalf("attr %d type = %d, want %d", i, got, wantTypes[i])
+		}
+	}
+	// Exact-byte assertion only for the ext-communities attr (traffic-rate
+	// 1e6 B/s): flags 0xc0 (optional+transitive), type 0x10
+	// (ext-communities), len 0x08, then traffic-rate value: type-high 0x80,
+	// sub-type 0x06, admin 0x0000, float32 1e6 = 0x49742400.
+	serialized, err := attrs[2].Serialize()
 	if err != nil {
-		t.Fatalf("serialize attr: %v", err)
+		t.Fatalf("serialize ext-com: %v", err)
 	}
-	// flags 0xc0 (optional+transitive), type 0x10 (ext-communities), len 0x08,
-	// then traffic-rate value: type-high 0x80, sub-type 0x06, admin 0x0000,
-	// float32 1e6 = 0x49742400.
 	want := []byte{0xc0, 0x10, 0x08, 0x80, 0x06, 0x00, 0x00, 0x49, 0x74, 0x24, 0x00}
 	if !bytes.Equal(serialized, want) {
-		t.Fatalf("attr = %x, want %x", serialized, want)
+		t.Fatalf("ext-com attr = %x, want %x", serialized, want)
 	}
 }
 
 func TestEncodeFlowspecIPv6(t *testing.T) {
 	rule := flowspec.Rule{Name: "t", Prefix: "2001:db8::1/128", Protocol: protoPtr(17), SrcPort: portPtr(53), Action: flowspec.ActionDrop}
-	key, _, _, err := encodeFlowspec(rule)
+	key, _, attrs, err := encodeFlowspec(rule)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
 	if want := "fs6|2001:db8::1/128|17|-|53"; key != want {
 		t.Fatalf("key = %q, want %q", key, want)
+	}
+	// Same mandatory Origin + NextHop + ext-communities shape as IPv4.
+	wantTypes := []bgp.BGPAttrType{
+		bgp.BGP_ATTR_TYPE_ORIGIN,
+		bgp.BGP_ATTR_TYPE_NEXT_HOP,
+		bgp.BGP_ATTR_TYPE_EXTENDED_COMMUNITIES,
+	}
+	if len(attrs) != len(wantTypes) {
+		t.Fatalf("attrs = %d, want %d", len(attrs), len(wantTypes))
+	}
+	for i, a := range attrs {
+		if got := a.GetType(); got != wantTypes[i] {
+			t.Fatalf("attr %d type = %d, want %d", i, got, wantTypes[i])
+		}
 	}
 }
 
