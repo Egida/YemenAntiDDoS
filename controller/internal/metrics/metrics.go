@@ -6,8 +6,8 @@
 //   - Gauges that read DB state use Prometheus custom collectors so the
 //     value is fresh-at-scrape-time. No background refresh goroutine
 //     (simpler, no staleness window).
-//   - Counters (vtysh ops, action executions) are incremented inline at
-//     call sites. Single source of truth is the Go variable — DB state
+//   - Counters (BGP speaker ops, action executions) are incremented inline
+//     at call sites. Single source of truth is the Go variable — DB state
 //     is NOT re-derived from counters.
 //   - /metrics endpoint is unauthenticated, matching industry convention
 //     for Prometheus scraping (relies on network-level isolation).
@@ -18,9 +18,11 @@
 //	xsight_xdrop_rules{status}             current xDrop rules by status
 //	xsight_scheduled_actions{status}       current scheduled actions by status
 //
-// Layer A (inline counters):
+// Layer A (inline counters + gauges):
 //
-//	xsight_vtysh_ops_total{operation,result}  vtysh announce/withdraw outcomes
+//	xsight_bgp_speaker_errors_total      embedded GoBGP speaker op failures
+//	xsight_bgp_peer_up{connector,neighbor}  BGP session state per peer
+//	xsight_bgp_paths{kind}               locally originated paths by kind
 //	xsight_action_executions_total{action_type,status}  action engine dispatch outcomes
 //
 // Layer B (attack tracker — wrap existing atomic counters):
@@ -59,6 +61,24 @@ var BGPWithdrawingReconcile = prometheus.NewCounterVec(prometheus.CounterOpts{Na
 
 var BGPAnnouncingReconcile = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "xsight_bgp_announcing_reconcile_total", Help: "Runtime BGP announcing label reconciliation outcomes."}, []string{"outcome"})
 
+// BGPSpeakerErrors counts GoBGP speaker AddPath/DeletePath/SyncPeers failures.
+var BGPSpeakerErrors = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "xsight_bgp_speaker_errors_total",
+	Help: "Embedded GoBGP speaker operation failures.",
+})
+
+// BGPPeerUp reflects BGP session state per connector peer (1 = established).
+var BGPPeerUp = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "xsight_bgp_peer_up",
+	Help: "BGP session state per configured peer (1 = established, 0 = down).",
+}, []string{"connector", "neighbor"})
+
+// BGPPaths counts locally originated paths in the speaker RIB by kind.
+var BGPPaths = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "xsight_bgp_paths",
+	Help: "Locally originated paths in the speaker RIB, by kind.",
+}, []string{"kind"})
+
 var ConfigPublishFailures = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "xsight_config_publish_failures_total", Help: "Config changes saved but publishAfterChange got an error: threshold tree rebuild, or node publish (build config / list nodes) failed."}, []string{"stage"})
 
 var StartupCleanup = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "xsight_startup_cleanup_total", Help: "Startup cleanup outcomes."}, []string{"kind", "outcome"})
@@ -71,24 +91,6 @@ var GRPCIdentityRejects = prometheus.NewCounterVec(
 	prometheus.CounterOpts{Name: "xsight_grpc_identity_rejects_total", Help: "Reports rejected for missing handshake."}, []string{"stream"},
 )
 var RingEstimatedMemoryBytes = prometheus.NewGauge(prometheus.GaugeOpts{Name: "xsight_ring_estimated_memory_bytes", Help: "Estimated memory for both ring directions."})
-
-// VtyshOps counts outcomes of vtysh commands xSight issues for BGP state
-// changes. Incremented by bgp.go at each performBGPAnnounce / performBGPWithdraw
-// / retry / recovery call site.
-//
-// Labels:
-//   - operation: "announce" | "withdraw"
-//   - result:    "success" | "failed" | "idempotent"
-//     ("idempotent" = vtysh returned a "route-absent" error on
-//     withdraw that xSight treats as success; tracked separately
-//     so operators can see how often FRR drift is absorbed).
-var VtyshOps = prometheus.NewCounterVec(
-	prometheus.CounterOpts{
-		Name: "xsight_vtysh_ops_total",
-		Help: "Total vtysh operations by operation and result.",
-	},
-	[]string{"operation", "result"},
-)
 
 // ActionExecutions counts action engine dispatch outcomes.
 //
@@ -159,12 +161,6 @@ var ScheduledActionsRecovered = prometheus.NewCounterVec(
 	},
 	[]string{"outcome"},
 )
-
-// RecordVtysh is a small helper so the action package doesn't need to
-// import the prometheus namespace directly.
-func RecordVtysh(operation, result string) {
-	VtyshOps.WithLabelValues(operation, result).Inc()
-}
 
 // RecordAction increments the action-execution counter. Mirrors the status
 // strings already written to action_execution_log.
@@ -327,6 +323,18 @@ func Register(reg prometheus.Registerer, s store.Store, t *tracker.Tracker) erro
 	if err := reg.Register(BGPAnnouncingReconcile); err != nil {
 		return err
 	}
+	if err := reg.Register(BGPSpeakerErrors); err != nil {
+		return err
+	}
+	if err := reg.Register(BGPPeerUp); err != nil {
+		return err
+	}
+	for _, kind := range []string{"rtbh", "flowspec"} {
+		BGPPaths.WithLabelValues(kind)
+	}
+	if err := reg.Register(BGPPaths); err != nil {
+		return err
+	}
 	for _, op := range []string{"announced", "withdrawn", "failed_announce", "failed_withdraw", "schedule"} {
 		BGPStaleWrites.WithLabelValues(op)
 	}
@@ -375,9 +383,6 @@ func Register(reg prometheus.Registerer, s store.Store, t *tracker.Tracker) erro
 		return err
 	}
 	if err := reg.Register(ActionQueueEvents); err != nil {
-		return err
-	}
-	if err := reg.Register(VtyshOps); err != nil {
 		return err
 	}
 	if err := reg.Register(ActionExecutions); err != nil {

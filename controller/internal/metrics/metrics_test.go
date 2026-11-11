@@ -3,7 +3,7 @@ package metrics
 // Tests for the v1.2.1 Prometheus metrics layer.
 //
 // Coverage:
-//   - Inline counter increments (RecordVtysh / RecordAction) show up in
+//   - Inline counter increments (RecordAction) show up in
 //     the registered CounterVec
 //   - Custom status collectors run their count function on scrape and emit
 //     one metric per status bucket
@@ -26,33 +26,6 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 // Counter tests
 // ─────────────────────────────────────────────────────────────────────────────
-
-func TestVtyshOps_IncrementsByLabel(t *testing.T) {
-	// Use a fresh registry so state from other tests doesn't leak in.
-	reg := prometheus.NewRegistry()
-	VtyshOps.Reset() // reset the package-global counter for this test
-	reg.MustRegister(VtyshOps)
-
-	RecordVtysh("announce", "success")
-	RecordVtysh("announce", "success")
-	RecordVtysh("announce", "failed")
-	RecordVtysh("withdraw", "idempotent")
-
-	if got := testutil.ToFloat64(VtyshOps.WithLabelValues("announce", "success")); got != 2 {
-		t.Errorf("announce/success = %v, want 2", got)
-	}
-	if got := testutil.ToFloat64(VtyshOps.WithLabelValues("announce", "failed")); got != 1 {
-		t.Errorf("announce/failed = %v, want 1", got)
-	}
-	if got := testutil.ToFloat64(VtyshOps.WithLabelValues("withdraw", "idempotent")); got != 1 {
-		t.Errorf("withdraw/idempotent = %v, want 1", got)
-	}
-	// Never-incremented labelsets should NOT show up in /metrics output
-	// (CounterVec only emits labelsets that have been touched).
-	if got := testutil.ToFloat64(VtyshOps.WithLabelValues("withdraw", "success")); got != 0 {
-		t.Errorf("withdraw/success = %v, want 0 (not incremented)", got)
-	}
-}
 
 func TestActionExecutions_IncrementsByLabel(t *testing.T) {
 	ActionExecutions.Reset()
