@@ -26,20 +26,26 @@ func (f *FakeSpeaker) record(call string) error {
 	return f.Err
 }
 
-func (f *FakeSpeaker) CallsOf(prefix string) int {
+// Count returns the number of recorded calls whose name matches exactly.
+func (f *FakeSpeaker) Count(call string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	n := 0
 	for _, c := range f.Calls {
-		if c == prefix {
+		if c == call {
 			n++
 		}
 	}
 	return n
 }
 
-func (f *FakeSpeaker) Start(_ context.Context) error { f.Started = true; return f.record("start") }
-func (f *FakeSpeaker) Stop(_ context.Context) error  { return f.record("stop") }
+func (f *FakeSpeaker) Start(_ context.Context) error {
+	f.mu.Lock()
+	f.Started = true
+	f.mu.Unlock()
+	return f.record("start")
+}
+func (f *FakeSpeaker) Stop(_ context.Context) error { return f.record("stop") }
 
 func (f *FakeSpeaker) AnnounceFlowspec(_ context.Context, rule flowspec.Rule) error {
 	f.mu.Lock()
@@ -70,9 +76,13 @@ func (f *FakeSpeaker) WithdrawBlackhole(_ context.Context, prefix string) error 
 }
 
 func (f *FakeSpeaker) SyncPeers(_ context.Context, peers []Peer) error {
-	for range peers {
-	}
 	return f.record("sync_peers")
 }
 
-func (f *FakeSpeaker) PeerStates(_ context.Context) []PeerState { return f.States }
+func (f *FakeSpeaker) PeerStates(_ context.Context) []PeerState {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]PeerState, len(f.States))
+	copy(out, f.States)
+	return out
+}
