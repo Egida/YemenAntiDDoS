@@ -15,16 +15,31 @@ const blackholeCommunity = 0xFFFF0000 | 666
 
 func parsePrefix(s string) (net.IP, *net.IPNet, error) {
 	s = strings.TrimSpace(s)
-	if ip, ipNet, err := net.ParseCIDR(s); err == nil {
-		return ip, ipNet, nil
-	}
-	if ip := net.ParseIP(s); ip != nil {
-		if ip.To4() != nil {
-			return ip, &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)}, nil
+	var ip net.IP
+	var ipNet *net.IPNet
+	if a, n, err := net.ParseCIDR(s); err == nil {
+		ip, ipNet = a, n
+	} else if p := net.ParseIP(s); p != nil {
+		if p.To4() != nil {
+			ipNet = &net.IPNet{IP: p, Mask: net.CIDRMask(32, 32)}
+		} else {
+			ipNet = &net.IPNet{IP: p, Mask: net.CIDRMask(128, 128)}
 		}
-		return ip, &net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)}, nil
+		ip = p
+	} else {
+		return nil, nil, fmt.Errorf("bgp: invalid prefix %q", s)
 	}
-	return nil, nil, fmt.Errorf("bgp: invalid prefix %q", s)
+	// An IPv4-mapped IPv6 input (::ffff:a.b.c.d[/len]) must become plain IPv4;
+	// a mapped /128 would otherwise encode as an IPv4 prefix of length 128.
+	if ip.To4() != nil {
+		ones, _ := ipNet.Mask.Size()
+		if ones > 32 {
+			return nil, nil, fmt.Errorf("bgp: prefix %q: length %d exceeds IPv4 maximum of 32", s, ones)
+		}
+		ip = ip.To4()
+		ipNet = &net.IPNet{IP: ip, Mask: net.CIDRMask(ones, 32)}
+	}
+	return ip, ipNet, nil
 }
 
 func numericItem(value uint64) *bgp.FlowSpecComponentItem {
@@ -75,6 +90,8 @@ func encodeFlowspec(rule flowspec.Rule) (key string, nlri bgp.AddrPrefixInterfac
 	}
 	rate := float32(0) // traffic-rate 0 = discard (RFC 8955 §7.1)
 	if act == flowspec.ActionRateLimit {
+		// RFC 8955 §7.1 encodes traffic-rate as IEEE-754 single precision, so
+		// float32 here loses nothing that survives the wire format.
 		rate = float32(rule.RateLimit) // Rule.RateLimit is bytes/sec, RFC 8955's unit
 	}
 	attrs = []bgp.PathAttributeInterface{
@@ -87,6 +104,9 @@ func encodeFlowspec(rule flowspec.Rule) (key string, nlri bgp.AddrPrefixInterfac
 	} else {
 		nlri = bgp.NewFlowSpecIPv6Unicast(rules)
 	}
+	// The key deliberately excludes Action/RateLimit: one logical rule per
+	// match tuple, so a rate change updates the existing path's attributes
+	// instead of orphaning the previously announced one.
 	key = fmt.Sprintf("%s|%s|%s|%s|%s", family, ipNet.String(), protoKey(rule), portKey(rule.DstPort), portKey(rule.SrcPort))
 	return key, nlri, attrs, nil
 }
@@ -128,9 +148,16 @@ func encodeBlackhole(prefix, nextHop string) (key string, nlri bgp.AddrPrefixInt
 		return key, nlri, attrs, nil
 	}
 	nlri = bgp.NewIPv6AddrPrefix(uint8(ones), ipNet.IP.String())
+	// MP_REACH must carry an IPv6 next-hop for a v6 route. The default
+	// rtbh_next_hop/router-id is IPv4, so fall back to the unspecified
+	// address and let gobgp rewrite it per-peer (next-hop self).
+	nh := "::"
+	if n6 := net.ParseIP(nextHop).To16(); n6 != nil && n6.To4() == nil {
+		nh = nextHop
+	}
 	attrs = []bgp.PathAttributeInterface{
 		bgp.NewPathAttributeOrigin(bgp.BGP_ORIGIN_ATTR_TYPE_IGP),
-		bgp.NewPathAttributeMpReachNLRI("::", []bgp.AddrPrefixInterface{nlri}),
+		bgp.NewPathAttributeMpReachNLRI(nh, []bgp.AddrPrefixInterface{nlri}),
 		communities,
 	}
 	key = fmt.Sprintf("rtbh6|%s", ipNet.String())

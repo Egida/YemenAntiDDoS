@@ -47,9 +47,39 @@ func TestEncodeFlowspecHostBitNormalization(t *testing.T) {
 
 func TestEncodeFlowspecPlainIPGetsHostMask(t *testing.T) {
 	rule := flowspec.Rule{Name: "t", Prefix: "198.51.100.7", Action: flowspec.ActionDrop}
-	_, _, _, err := encodeFlowspec(rule)
+	key, _, _, err := encodeFlowspec(rule)
 	if err != nil {
 		t.Fatalf("plain IP must encode as /32: %v", err)
+	}
+	if want := "fs4|198.51.100.7/32|-|-|-"; key != want {
+		t.Fatalf("key = %q, want %q", key, want)
+	}
+}
+
+func TestEncodeFlowspecMappedV6Rejected(t *testing.T) {
+	if _, _, _, err := encodeFlowspec(flowspec.Rule{Name: "t", Prefix: "::ffff:198.51.100.7/128", Action: flowspec.ActionDrop}); err == nil {
+		t.Fatal("mapped-v6 /128 must be rejected, not encoded as IPv4 /128")
+	}
+	if _, _, _, err := encodeFlowspec(flowspec.Rule{Name: "t", Prefix: "::ffff:198.51.100.7", Action: flowspec.ActionDrop}); err != nil {
+		t.Fatalf("mapped-v6 plain IP should normalize to IPv4 /32: %v", err)
+	}
+}
+
+func TestEncodeFlowspecBothPortsGolden(t *testing.T) {
+	rule := flowspec.Rule{Name: "t", Prefix: "192.0.2.0/24", Protocol: protoPtr(17), DstPort: portPtr(53), SrcPort: portPtr(53), Action: flowspec.ActionDrop}
+	_, nlri, _, err := encodeFlowspec(rule)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	got, err := nlri.Serialize()
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
+	// dst 192.0.2.0/24 + proto udp(17) + dport 53 + sport 53, RFC type order.
+	// Length 0x0e = 14 component octets (5+3+3+3), per RFC §4.1/§4.3.1.
+	want := []byte{0x0e, 0x01, 0x18, 0xc0, 0x00, 0x02, 0x03, 0x81, 0x11, 0x05, 0x81, 0x35, 0x06, 0x81, 0x35}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("nlri = %x, want %x", got, want)
 	}
 }
 
