@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/d80y6/YemenDDoS/controller/internal/store"
 	"github.com/jackc/pgx/v5"
@@ -20,7 +21,7 @@ func (r *bgpInstanceRepo) Get(ctx context.Context) (*store.BGPInstance, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("bgp_instance: %w", err)
 	}
 	return &inst, nil
 }
@@ -32,5 +33,8 @@ func (r *bgpInstanceRepo) Upsert(ctx context.Context, inst *store.BGPInstance) e
 		 ON CONFLICT (id) DO UPDATE SET
 		   local_asn=$1, router_id=$2, listen_port=$3, rtbh_next_hop=$4, updated_at=now()`,
 		inst.LocalASN, inst.RouterID, inst.ListenPort, inst.RTBHNextHop)
-	return err
+	if err != nil {
+		return fmt.Errorf("bgp_instance: %w", err)
+	}
+	return nil
 }

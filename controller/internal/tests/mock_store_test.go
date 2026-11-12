@@ -70,7 +70,7 @@ type MockStore struct {
 	flowLogRepo           stubFlowLogRepo
 	flowListenerRepo      stubFlowListenerRepo
 	flowSourceRepo        stubFlowSourceRepo
-	bgpInstanceRepo       stubBGPInstanceRepo
+	bgpInstanceRepo       *stubBGPInstanceRepo
 }
 
 func (r *mockAttackRepo) LiveIDs(ctx context.Context, ids []int) (map[int]bool, error) {
@@ -168,6 +168,7 @@ func NewMockStore() *MockStore {
 		scheduledActions:      &mockScheduledActionRepo{},
 		xdropActiveRules:      &mockXDropActiveRuleRepo{},
 		bgpAnnouncements:      &mockBGPAnnouncementRepo{},
+		bgpInstanceRepo:       &stubBGPInstanceRepo{},
 		// Aliases (same pointers, different names used by different test files)
 		responseRepo:      respRepo,
 		actionExecLog:     aelog,
@@ -2148,10 +2149,12 @@ func (r *mockBGPAnnouncementRepo) ListEvents(_ context.Context, announcementID i
 
 // ─────────────────────────── Stub repos ───────────────────────────
 
-type stubBGPInstanceRepo struct{}
+type stubBGPInstanceRepo struct{ inst *store.BGPInstance }
 
-func (stubBGPInstanceRepo) Get(_ context.Context) (*store.BGPInstance, error) { return nil, nil }
-func (stubBGPInstanceRepo) Upsert(_ context.Context, _ *store.BGPInstance) error {
+func (s *stubBGPInstanceRepo) Get(context.Context) (*store.BGPInstance, error) { return s.inst, nil }
+func (s *stubBGPInstanceRepo) Upsert(_ context.Context, inst *store.BGPInstance) error {
+	cp := *inst
+	s.inst = &cp
 	return nil
 }
 

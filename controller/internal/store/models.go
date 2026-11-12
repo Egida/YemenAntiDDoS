@@ -237,9 +237,10 @@ type BGPConnector struct {
 	// (whole-prefix blackhole) to a narrower Flowspec rule.
 	FlowspecEnabled bool `json:"flowspec_enabled"`
 	// Peering details; an enabled connector requires all three (API validation).
-	NeighborIP  string    `json:"neighbor_ip"`
-	NeighborASN int       `json:"neighbor_asn"`
-	MD5Password string    `json:"md5_password"`
+	NeighborIP  string `json:"neighbor_ip"`
+	NeighborASN int    `json:"neighbor_asn"`
+	// MD5Password is never serialized (shared secret).
+	MD5Password string    `json:"-"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }

@@ -34,6 +34,7 @@ type feMemory struct {
 	webhook       map[int]store.WebhookConnector
 	shell         map[int]store.ShellConnector
 	bgp           map[int]store.BGPConnector
+	bgpInstance   *store.BGPInstance
 	xdrop         map[int]store.XDropConnector
 	listeners     map[int]store.FlowListener
 	sources       map[int]store.FlowSource
@@ -967,6 +968,25 @@ func (m *feMemory) BGPConnectors() store.BGPConnectorRepo           { return &fe
 func (r *feBGP) List(context.Context) ([]store.BGPConnector, error) { return feAll(r.m.bgp), nil }
 func (r *feBGP) Get(_ context.Context, id int) (*store.BGPConnector, error) {
 	return feGet(r.m.bgp, id)
+}
+
+type feBGPInstance struct {
+	store.BGPInstanceRepo
+	m *feMemory
+}
+
+func (m *feMemory) BGPInstances() store.BGPInstanceRepo { return &feBGPInstance{m: m} }
+func (r *feBGPInstance) Get(context.Context) (*store.BGPInstance, error) {
+	if r.m.bgpInstance == nil {
+		return nil, nil
+	}
+	cp := *r.m.bgpInstance
+	return &cp, nil
+}
+func (r *feBGPInstance) Upsert(_ context.Context, inst *store.BGPInstance) error {
+	cp := *inst
+	r.m.bgpInstance = &cp
+	return nil
 }
 
 type feXDrop struct {

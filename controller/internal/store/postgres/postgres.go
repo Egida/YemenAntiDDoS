@@ -686,11 +686,11 @@ const copyLegacyWebhooks = `INSERT INTO webhook_connectors (name, url, headers, 
 // v5.0: embedded GoBGP speaker — global identity + neighbor peering.
 const createBGPInstance = `CREATE TABLE IF NOT EXISTS bgp_instance (
 		id INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-		local_asn INT NOT NULL DEFAULT 0,
+		local_asn BIGINT NOT NULL DEFAULT 0,
 		router_id TEXT NOT NULL DEFAULT '',
 		listen_port INT NOT NULL DEFAULT 179,
 		rtbh_next_hop TEXT NOT NULL DEFAULT '',
-		updated_at TIMESTAMPTZ DEFAULT now()
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 	)`
 
 const createBGPAnnouncements = `CREATE TABLE IF NOT EXISTS bgp_announcements (
@@ -1557,7 +1557,7 @@ var migrations = []string{
 	// v5.0: embedded GoBGP speaker — global identity + neighbor peering.
 	createBGPInstance,
 	`ALTER TABLE bgp_connectors ADD COLUMN IF NOT EXISTS neighbor_ip TEXT NOT NULL DEFAULT ''`,
-	`ALTER TABLE bgp_connectors ADD COLUMN IF NOT EXISTS neighbor_asn INT NOT NULL DEFAULT 0`,
+	`ALTER TABLE bgp_connectors ADD COLUMN IF NOT EXISTS neighbor_asn BIGINT NOT NULL DEFAULT 0`,
 	`ALTER TABLE bgp_connectors ADD COLUMN IF NOT EXISTS md5_password TEXT NOT NULL DEFAULT ''`,
 	`DO $$ BEGIN
 	  IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'bgp_connectors'::regclass
