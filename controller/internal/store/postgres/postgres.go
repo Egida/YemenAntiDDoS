@@ -42,6 +42,7 @@ type PGStore struct {
 	flowListeners     *flowListenerRepo
 	flowSources       *flowSourceRepo
 	bgpConnectors     *bgpConnectorRepo
+	bgpInstances      *bgpInstanceRepo
 	manualOverrides   *manualOverrideRepo  // v1.2 PR-2
 	scheduledActions  *scheduledActionRepo // v1.2 PR-3
 	xdropActiveRules  *xdropActiveRuleRepo // v1.2 PR-4
@@ -85,6 +86,7 @@ func New(ctx context.Context, dsn string) (*PGStore, error) {
 	s.flowListeners = &flowListenerRepo{pool: pool}
 	s.flowSources = &flowSourceRepo{pool: pool}
 	s.bgpConnectors = &bgpConnectorRepo{pool: pool}
+	s.bgpInstances = &bgpInstanceRepo{pool: pool}
 	s.manualOverrides = &manualOverrideRepo{pool: pool}
 	s.scheduledActions = &scheduledActionRepo{pool: pool}
 	s.xdropActiveRules = &xdropActiveRuleRepo{pool: pool}
@@ -117,6 +119,7 @@ func (s *PGStore) FlowLogs() store.FlowLogRepo                     { return s.fl
 func (s *PGStore) FlowListeners() store.FlowListenerRepo           { return s.flowListeners }
 func (s *PGStore) FlowSources() store.FlowSourceRepo               { return s.flowSources }
 func (s *PGStore) BGPConnectors() store.BGPConnectorRepo           { return s.bgpConnectors }
+func (s *PGStore) BGPInstances() store.BGPInstanceRepo             { return s.bgpInstances }
 func (s *PGStore) ManualOverrides() store.ActionManualOverrideRepo { return s.manualOverrides }  // v1.2 PR-2
 func (s *PGStore) ScheduledActions() store.ScheduledActionRepo     { return s.scheduledActions } // v1.2 PR-3
 func (s *PGStore) XDropActiveRules() store.XDropActiveRuleRepo     { return s.xdropActiveRules } // v1.2 PR-4
@@ -679,6 +682,16 @@ const copyLegacyWebhooks = `INSERT INTO webhook_connectors (name, url, headers, 
 	 SELECT 'legacy-webhook-' || id, url, CASE WHEN jsonb_typeof(headers) = 'object' THEN headers ELSE '{}'::jsonb END, true, enabled FROM webhooks
 	 WHERE NOT EXISTS (SELECT 1 FROM webhook_connectors WHERE name = 'legacy-webhook-' || webhooks.id)
 	 ON CONFLICT DO NOTHING`
+
+// v5.0: embedded GoBGP speaker — global identity + neighbor peering.
+const createBGPInstance = `CREATE TABLE IF NOT EXISTS bgp_instance (
+		id INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+		local_asn INT NOT NULL DEFAULT 0,
+		router_id TEXT NOT NULL DEFAULT '',
+		listen_port INT NOT NULL DEFAULT 179,
+		rtbh_next_hop TEXT NOT NULL DEFAULT '',
+		updated_at TIMESTAMPTZ DEFAULT now()
+	)`
 
 const createBGPAnnouncements = `CREATE TABLE IF NOT EXISTS bgp_announcements (
 		id               SERIAL PRIMARY KEY,
@@ -1541,6 +1554,11 @@ var migrations = []string{
 	`ALTER TABLE bgp_announcements ADD COLUMN IF NOT EXISTS rule_spec TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE bgp_connectors ADD COLUMN IF NOT EXISTS vendor TEXT NOT NULL DEFAULT 'frr'`,
 	`ALTER TABLE bgp_connectors ADD COLUMN IF NOT EXISTS flowspec_enabled BOOLEAN NOT NULL DEFAULT false`,
+	// v5.0: embedded GoBGP speaker — global identity + neighbor peering.
+	createBGPInstance,
+	`ALTER TABLE bgp_connectors ADD COLUMN IF NOT EXISTS neighbor_ip TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE bgp_connectors ADD COLUMN IF NOT EXISTS neighbor_asn INT NOT NULL DEFAULT 0`,
+	`ALTER TABLE bgp_connectors ADD COLUMN IF NOT EXISTS md5_password TEXT NOT NULL DEFAULT ''`,
 	`DO $$ BEGIN
 	  IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'bgp_connectors'::regclass
 	             AND attname = 'bgp_asn' AND atttypid = 'int4'::regtype) THEN

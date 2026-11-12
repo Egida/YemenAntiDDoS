@@ -91,7 +91,7 @@ func dao13dNew(t *testing.T) *dao13dFixture {
 	f.path = filepath.Join(dir, "vtysh")
 	f.record = filepath.Join(dir, "commands")
 	f.script("", false, false)
-	conn := &store.BGPConnector{Name: "dao13d", Enabled: true, VtyshPath: f.path, BGPASN: 64512, AddressFamily: "ipv4 unicast"}
+	conn := &store.BGPConnector{Name: "dao13d", Enabled: true, BGPASN: 64512, AddressFamily: "ipv4 unicast"}
 	var err error
 	f.cid, err = f.db.BGPConnectors().Create(f.c, conn)
 	dao13dCheck(t, err)

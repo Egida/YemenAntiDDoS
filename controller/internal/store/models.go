@@ -223,22 +223,34 @@ type ShellConnector struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
-// BGPConnector stores a local FRR BGP instance configuration.
+// BGPConnector is one BGP neighbor (peer) of the embedded speaker.
 type BGPConnector struct {
 	ID            int    `json:"id"`
 	Name          string `json:"name"`
-	VtyshPath     string `json:"vtysh_path"`
 	BGPASN        int    `json:"bgp_asn"`
 	AddressFamily string `json:"address_family"`
 	Enabled       bool   `json:"enabled"`
 	Description   string `json:"description"`
-	// Vendor selects the Flowspec CLI dialect (frr, cisco_xr, juniper, arista).
+	// Vendor is informational only since the GoBGP refactor (free text).
 	Vendor string `json:"vendor"`
 	// FlowspecEnabled switches BGP actions on this connector from RTBH
 	// (whole-prefix blackhole) to a narrower Flowspec rule.
-	FlowspecEnabled bool      `json:"flowspec_enabled"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	FlowspecEnabled bool `json:"flowspec_enabled"`
+	// Peering details; an enabled connector requires all three (API validation).
+	NeighborIP  string    `json:"neighbor_ip"`
+	NeighborASN int       `json:"neighbor_asn"`
+	MD5Password string    `json:"md5_password"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// BGPInstance is the single-row global speaker configuration.
+type BGPInstance struct {
+	LocalASN    int       `json:"local_asn"`
+	RouterID    string    `json:"router_id"`
+	ListenPort  int       `json:"listen_port"`
+	RTBHNextHop string    `json:"rtbh_next_hop"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // ActionExecutionLog records the execution of a response action.

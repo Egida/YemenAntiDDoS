@@ -188,8 +188,8 @@ func feLoadPG(t *testing.T, db *PGStore) {
 			v.ID, v.Name, v.Command, v.DefaultArgs, v.TimeoutMs, v.PassStdin, v.Enabled, v.CreatedAt, v.UpdatedAt)
 	}
 	for _, v := range feAll(m.bgp) {
-		insert("bgp_connectors", "id,name,vtysh_path,bgp_asn,address_family,enabled,description,created_at,updated_at",
-			v.ID, v.Name, v.VtyshPath, v.BGPASN, v.AddressFamily, v.Enabled, v.Description, v.CreatedAt, v.UpdatedAt)
+		insert("bgp_connectors", "id,name,bgp_asn,address_family,enabled,description,created_at,updated_at",
+			v.ID, v.Name, v.BGPASN, v.AddressFamily, v.Enabled, v.Description, v.CreatedAt, v.UpdatedAt)
 	}
 	for _, v := range feAll(m.xdrop) {
 		insert("xdrop_connectors", "id,name,api_url,api_key,timeout_ms,enabled,created_at,updated_at",

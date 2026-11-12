@@ -10,7 +10,7 @@ import (
 func TestDao11c_G6a_FullASN(t *testing.T) {
 	db := newPostgresContractBackend(t).Store().(*PGStore)
 	ctx := context.Background()
-	id, err := db.BGPConnectors().Create(ctx, &store.BGPConnector{Name: "dao11c-max", BGPASN: 4294967295, VtyshPath: "/usr/bin/vtysh", AddressFamily: "auto", Enabled: true})
+	id, err := db.BGPConnectors().Create(ctx, &store.BGPConnector{Name: "dao11c-max", BGPASN: 4294967295, AddressFamily: "auto", Enabled: true})
 	if err != nil {
 		t.Fatalf("create ASN 4294967295: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestDao11c_G6b_MigrateExistingASN(t *testing.T) {
 		}
 	}
 	assertType("integer")
-	id, err := db.BGPConnectors().Create(ctx, &store.BGPConnector{Name: "dao11c-existing", BGPASN: 65000, VtyshPath: "/usr/bin/vtysh", AddressFamily: "auto", Enabled: true})
+	id, err := db.BGPConnectors().Create(ctx, &store.BGPConnector{Name: "dao11c-existing", BGPASN: 65000, AddressFamily: "auto", Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -70,6 +70,7 @@ type MockStore struct {
 	flowLogRepo           stubFlowLogRepo
 	flowListenerRepo      stubFlowListenerRepo
 	flowSourceRepo        stubFlowSourceRepo
+	bgpInstanceRepo       stubBGPInstanceRepo
 }
 
 func (r *mockAttackRepo) LiveIDs(ctx context.Context, ids []int) (map[int]bool, error) {
@@ -218,6 +219,7 @@ func (m *MockStore) FlowLogs() store.FlowLogRepo                     { return m.
 func (m *MockStore) FlowListeners() store.FlowListenerRepo           { return m.flowListenerRepo }
 func (m *MockStore) FlowSources() store.FlowSourceRepo               { return m.flowSourceRepo }
 func (m *MockStore) BGPConnectors() store.BGPConnectorRepo           { return m.bgpConnectors }
+func (m *MockStore) BGPInstances() store.BGPInstanceRepo             { return m.bgpInstanceRepo }
 func (m *MockStore) ManualOverrides() store.ActionManualOverrideRepo { return m.manualOverrides }  // v1.2 PR-2
 func (m *MockStore) ScheduledActions() store.ScheduledActionRepo     { return m.scheduledActions } // v1.2 PR-3
 func (m *MockStore) XDropActiveRules() store.XDropActiveRuleRepo     { return m.xdropActiveRules } // v1.2 PR-4
@@ -2145,6 +2147,13 @@ func (r *mockBGPAnnouncementRepo) ListEvents(_ context.Context, announcementID i
 }
 
 // ─────────────────────────── Stub repos ───────────────────────────
+
+type stubBGPInstanceRepo struct{}
+
+func (stubBGPInstanceRepo) Get(_ context.Context) (*store.BGPInstance, error) { return nil, nil }
+func (stubBGPInstanceRepo) Upsert(_ context.Context, _ *store.BGPInstance) error {
+	return nil
+}
 
 type stubNodeRepo struct{}
 

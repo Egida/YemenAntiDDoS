@@ -49,6 +49,8 @@ type Store interface {
 	FlowSources() FlowSourceRepo
 	// v3.1: BGP connectors
 	BGPConnectors() BGPConnectorRepo
+	// v5.0: global BGP speaker instance (single row)
+	BGPInstances() BGPInstanceRepo
 	Close()
 }
 
@@ -524,6 +526,13 @@ type BGPConnectorRepo interface {
 	Create(ctx context.Context, c *BGPConnector) (int, error)
 	Update(ctx context.Context, c *BGPConnector) error
 	Delete(ctx context.Context, id int) error
+}
+
+// BGPInstanceRepo manages the single-row speaker configuration.
+type BGPInstanceRepo interface {
+	// Get returns nil, nil when no row exists (speaker unconfigured).
+	Get(ctx context.Context) (*BGPInstance, error)
+	Upsert(ctx context.Context, inst *BGPInstance) error
 }
 
 // v3.0: FlowListenerRepo manages flow listener configurations.

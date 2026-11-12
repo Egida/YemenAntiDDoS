@@ -18,7 +18,7 @@ func fuzhuoSeed(t *testing.T, b Backend, ended ...bool) (store.Store, int, []int
 	s := b.Store()
 	resp := seedResponse(t, s, "fuzhuo")
 	act := seedAction(t, s, resp)
-	conn, err := s.BGPConnectors().Create(ctx, &store.BGPConnector{Name: "fuzhuo", Enabled: true, VtyshPath: "/usr/bin/true", BGPASN: 64512, AddressFamily: "ipv4 unicast"})
+	conn, err := s.BGPConnectors().Create(ctx, &store.BGPConnector{Name: "fuzhuo", Enabled: true, BGPASN: 64512, AddressFamily: "ipv4 unicast"})
 	check(t, err)
 	var ids []int
 	var ann int
