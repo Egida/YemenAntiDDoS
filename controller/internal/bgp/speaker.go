@@ -26,6 +26,9 @@ type Peer struct {
 	NeighborASN   uint32
 	MD5Password   string
 	AddressFamily string // "ipv4" | "ipv6" | "auto"
+	// RemotePort overrides the neighbor's listen port (default 179). Used by
+	// tests and by deployments where the upstream accepts on a custom port.
+	RemotePort uint32
 }
 
 // PeerState is the live session state for console + metrics.

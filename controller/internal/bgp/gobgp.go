@@ -162,6 +162,12 @@ func (s *GobgpSpeaker) addPeer(ctx context.Context, p Peer) error {
 			Family: &api.Family{Afi: f.Afi, Safi: f.Safi}, Enabled: true,
 		}})
 	}
+	// The speaker is outbound-only: RemotePort dials a neighbor listening on
+	// a custom port instead of TCP/179 (tests, custom deployments).
+	var transport *api.Transport
+	if p.RemotePort != 0 {
+		transport = &api.Transport{RemotePort: p.RemotePort}
+	}
 	err := s.server().AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
 		Conf: &api.PeerConf{
 			NeighborAddress: p.NeighborIP,
@@ -169,7 +175,8 @@ func (s *GobgpSpeaker) addPeer(ctx context.Context, p Peer) error {
 			AuthPassword:    p.MD5Password,
 			Description:     p.Name,
 		},
-		AfiSafis: afs,
+		AfiSafis:  afs,
+		Transport: transport,
 	}})
 	if err != nil {
 		metrics.BGPSpeakerErrors.Inc()
