@@ -33,6 +33,8 @@ type GobgpSpeaker struct {
 	stopCh    chan struct{}
 }
 
+var _ Speaker = (*GobgpSpeaker)(nil)
+
 func NewGobgp(cfg Config) *GobgpSpeaker {
 	return &GobgpSpeaker{
 		cfg:       cfg,
@@ -156,6 +158,9 @@ func normalizeAddr(s string) string {
 }
 
 func (s *GobgpSpeaker) addPeer(ctx context.Context, p Peer) error {
+	if p.RemotePort > 65535 {
+		return fmt.Errorf("bgp: peer %s: remote port %d exceeds 65535", p.NeighborIP, p.RemotePort)
+	}
 	afs := make([]*api.AfiSafi, 0, 2)
 	for _, f := range peerFamilies(effectiveAF(p)) {
 		afs = append(afs, &api.AfiSafi{Config: &api.AfiSafiConfig{
@@ -212,7 +217,7 @@ func (s *GobgpSpeaker) SyncPeers(ctx context.Context, peers []Peer) error {
 	for addr, p := range desired {
 		if old, ok := s.peers[p.ConnectorID]; ok && existing[addr] &&
 			old.NeighborASN == p.NeighborASN && old.MD5Password == p.MD5Password &&
-			old.AddressFamily == p.AddressFamily {
+			old.AddressFamily == p.AddressFamily && old.RemotePort == p.RemotePort {
 			continue
 		}
 		if existing[addr] {
