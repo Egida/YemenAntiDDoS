@@ -71,11 +71,9 @@ type ActiveResponseAction struct {
 	IsOrphan       bool `json:"is_orphan,omitempty"`
 	AnnouncementID int  `json:"announcement_id,omitempty"` // BGP: PR-5 announcement row ID
 	// BGP: "rtbh" (whole-prefix blackhole) or "flowspec" (narrower match).
-	// Flowspec rows also carry the rendered CLI so the operator can inspect
-	// and copy the exact rule that is live in FRR.
-	Kind     string   `json:"kind,omitempty"`
-	Vendor   string   `json:"vendor,omitempty"`
-	Commands []string `json:"commands,omitempty"`
+	// Flowspec rows carry the vendor-neutral match description.
+	Kind  string `json:"kind,omitempty"`
+	Match string `json:"match,omitempty"`
 	// BGP: list of all attacks that have attached to this announcement (history
 	// + currently attached). Operators need this to see which attack(s) are
 	// referencing a shared announcement when refcount > 1. attack_id in the
@@ -265,12 +263,10 @@ func buildActiveBGPFromAnnouncements(ctx *gin.Context, s store.Store) ([]ActiveR
 		if kind == "" {
 			kind = "rtbh"
 		}
-		vendor := ""
-		var commands []string
+		match := ""
 		if kind == "flowspec" {
 			view := buildFlowspecView(ann, connRef)
-			vendor = view.Vendor
-			commands = view.Commands
+			match = view.Match
 		}
 
 		result = append(result, ActiveResponseAction{
@@ -289,8 +285,7 @@ func buildActiveBGPFromAnnouncements(ctx *gin.Context, s store.Store) ([]ActiveR
 			IsOrphan:        isOrphan,
 			AnnouncementID:  ann.ID,
 			Kind:            kind,
-			Vendor:          vendor,
-			Commands:        commands,
+			Match:           match,
 			AttachedAttacks: attachedAttacks,
 		})
 	}
@@ -494,7 +489,7 @@ func forceRemoveAction(deps Dependencies) gin.HandlerFunc {
 		}
 		// v1.2 PR-2: write to indexed action_manual_overrides table for O(1)
 		// lookup after success. BGP ForceRemove already persists overrides
-		// for every detached attachment before vtysh, even if withdrawal fails.
+		// for every detached attachment before the speaker withdrawal, even if withdrawal fails.
 		// Idempotent via ON CONFLICT in repo.Create.
 		if removeErr == nil {
 			override := &store.ActionManualOverride{
@@ -588,7 +583,7 @@ func orphanForceWithdraw(deps Dependencies) gin.HandlerFunc {
 			errResponse(c, http.StatusBadRequest, fmt.Sprintf("announcement %d status=%s is not orphan; use /force-remove instead", ann.ID, ann.Status))
 			return
 		}
-		// Look up connector for vtysh command.
+		// Look up connector for the speaker withdrawal.
 		conn, cErr := deps.Store.BGPConnectors().Get(c, ann.ConnectorID)
 		if cErr != nil {
 			dbError(c, "lookup connector: ", cErr)
@@ -608,7 +603,7 @@ func orphanForceWithdraw(deps Dependencies) gin.HandlerFunc {
 			}
 			deps.ActionEngine.CancelAnnouncementDelay(ann.ID, gen, "orphan force withdraw")
 		}
-		// Run vtysh no network directly via action.performBGPWithdraw by
+		// Run the speaker withdrawal directly via action.performBGPWithdraw by
 		// constructing a synthetic ResponseAction (no real action row exists).
 		// Leverage the existing PR-5 code path for logging + MarkWithdrawn/Failed.
 		synthAct := store.ResponseAction{ID: 0, ActionType: "bgp", BGPRouteMap: ann.RouteMap}
@@ -616,8 +611,8 @@ func orphanForceWithdraw(deps Dependencies) gin.HandlerFunc {
 		synthAct.BGPConnectorID = &connID
 		_, wErr := action.PerformBGPWithdrawForOrphan(c, deps.Store, conn, synthAct, ann.Prefix, ann.RouteMap, ann.ID, gen)
 		if wErr != nil {
-			log.Printf("api: orphan force withdraw announcement_id=%d vtysh failed: %v", ann.ID, wErr)
-			ok(c, gin.H{"ok": true, "warning": fmt.Sprintf("vtysh error: %v (row marked failed)", wErr)})
+			log.Printf("api: orphan force withdraw announcement_id=%d speaker failed: %v", ann.ID, wErr)
+			ok(c, gin.H{"ok": true, "warning": fmt.Sprintf("speaker error: %v (row marked failed)", wErr)})
 			return
 		}
 		diff, _ := json.Marshal(map[string]any{"announcement_id": ann.ID, "prefix": ann.Prefix, "route_map": ann.RouteMap})

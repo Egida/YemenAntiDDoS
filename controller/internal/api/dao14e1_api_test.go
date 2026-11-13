@@ -20,23 +20,25 @@ func TestDao14e1_CB02(t *testing.T) {
 	for _, tc := range []struct {
 		name, body, description string
 	}{
-		{"ExplicitEmpty", `{"name":"n1","bgp_asn":65000,"vtysh_path":"/usr/bin/vtysh","description":"","enabled":true}`, ""},
+		{"ExplicitEmpty", `{"name":"n1","bgp_asn":65000,"neighbor_ip":"192.0.2.1","neighbor_asn":65001,"description":"","enabled":true}`, ""},
 		{"Null", `{"description":null}`, "d-old"},
 		{"Omitted", `{"enabled":true}`, "d-old"},
 		{"NewValue", `{"description":"d-new"}`, "d-new"},
-		{"OtherStringsUnchanged", `{"name":"","vtysh_path":"","address_family":""}`, "d-old"},
+		{"OtherStringsUnchanged", `{"name":"","neighbor_ip":"192.0.2.1","neighbor_asn":65001,"address_family":""}`, "d-old"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := dao11cFixture()
 			s.bgps.rows[0].Description = "d-old"
-			s.bgps.rows[0].VtyshPath = "/usr/bin/vtysh"
+			s.bgps.rows[0].NeighborIP = "192.0.2.1"
+			s.bgps.rows[0].NeighborASN = 65001
 			s.bgps.rows[0].AddressFamily = "auto"
 			dao11cRequest(t, s, "PUT", dao11cConnectorPath("bgp", "PUT"), json.RawMessage(tc.body), http.StatusOK, "")
 			row := s.bgps.rows[0]
 			dao11cEqual(t, row.Description, tc.description)
 			if tc.name == "OtherStringsUnchanged" {
 				dao11cEqual(t, row.Name, "n1")
-				dao11cEqual(t, row.VtyshPath, "/usr/bin/vtysh")
+				dao11cEqual(t, row.NeighborIP, "192.0.2.1")
+				dao11cEqual(t, row.NeighborASN, 65001)
 				dao11cEqual(t, row.AddressFamily, "auto")
 			}
 			if tc.name == "ExplicitEmpty" {

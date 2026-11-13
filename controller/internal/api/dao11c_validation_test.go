@@ -24,16 +24,17 @@ import (
 // calls even when the written row is identical, including audit and target writes.
 type dao11cStore struct {
 	store.Store
-	mu         sync.Mutex
-	writes     map[string]int
-	actions    *dao11cRows[store.ResponseAction]
-	thresholds *dao11cRows[store.Threshold]
-	shells     *dao11cRows[store.ShellConnector]
-	xdrops     *dao11cRows[store.XDropConnector]
-	hooks      *dao11cRows[store.WebhookConnector]
-	bgps       *dao11cRows[store.BGPConnector]
-	prefixes   *dao11cRows[store.WatchPrefix]
-	audits     []store.AuditLog
+	mu          sync.Mutex
+	writes      map[string]int
+	actions     *dao11cRows[store.ResponseAction]
+	thresholds  *dao11cRows[store.Threshold]
+	shells      *dao11cRows[store.ShellConnector]
+	xdrops      *dao11cRows[store.XDropConnector]
+	hooks       *dao11cRows[store.WebhookConnector]
+	bgps        *dao11cRows[store.BGPConnector]
+	bgpInstance *dao11cBGPInstances
+	prefixes    *dao11cRows[store.WatchPrefix]
+	audits      []store.AuditLog
 }
 
 func dao11cCopy[T any](v T) T {
@@ -105,6 +106,31 @@ func (r *dao11cRows[T]) Delete(_ context.Context, id int) error {
 	}
 	return nil
 }
+
+type dao11cBGPInstances struct {
+	s    *dao11cStore
+	inst *store.BGPInstance
+}
+
+func (r *dao11cBGPInstances) Get(context.Context) (*store.BGPInstance, error) {
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	if r.inst == nil {
+		return nil, nil
+	}
+	inst := dao11cCopy(*r.inst)
+	return &inst, nil
+}
+
+func (r *dao11cBGPInstances) Upsert(_ context.Context, inst *store.BGPInstance) error {
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	r.s.writes["BGPInstances.Upsert"]++
+	v := dao11cCopy(*inst)
+	r.inst = &v
+	return nil
+}
+
 func (r *dao11cRows[T]) Count(c context.Context) (int, error)               { v, e := r.List(c); return len(v), e }
 func (r *dao11cRows[T]) ListByPrefix(c context.Context, _ int) ([]T, error) { return r.List(c) }
 func (r *dao11cRows[T]) ListTree(c context.Context) ([]T, error)            { return r.List(c) }
@@ -114,10 +140,19 @@ func (r *dao11cRows[T]) ListGlobal(c context.Context) ([]T, error)          { re
 func (s *dao11cStore) ShellConnectors() store.ShellConnectorRepo     { return s.shells }
 func (s *dao11cStore) XDropConnectors() store.XDropConnectorRepo     { return s.xdrops }
 func (s *dao11cStore) WebhookConnectors() store.WebhookConnectorRepo { return s.hooks }
-func (s *dao11cStore) BGPConnectors() store.BGPConnectorRepo         { return s.bgps }
-func (s *dao11cStore) Thresholds() store.ThresholdRepo               { return s.thresholds }
-func (s *dao11cStore) Prefixes() store.PrefixRepo                    { return s.prefixes }
-func (s *dao11cStore) count(name string)                             { s.mu.Lock(); defer s.mu.Unlock(); s.writes[name]++ }
+
+type dao11cAnnouncements struct{ store.BGPAnnouncementRepo }
+
+func (dao11cAnnouncements) CountLiveByConnector(context.Context, int) (int, error) {
+	return 0, nil
+}
+
+func (s *dao11cStore) BGPConnectors() store.BGPConnectorRepo       { return s.bgps }
+func (s *dao11cStore) BGPInstances() store.BGPInstanceRepo         { return s.bgpInstance }
+func (s *dao11cStore) BGPAnnouncements() store.BGPAnnouncementRepo { return dao11cAnnouncements{} }
+func (s *dao11cStore) Thresholds() store.ThresholdRepo             { return s.thresholds }
+func (s *dao11cStore) Prefixes() store.PrefixRepo                  { return s.prefixes }
+func (s *dao11cStore) count(name string)                           { s.mu.Lock(); defer s.mu.Unlock(); s.writes[name]++ }
 
 type dao11cResponses struct {
 	store.ResponseRepo
@@ -142,6 +177,9 @@ func (r dao11cResponses) CreateAction(c context.Context, a *store.ResponseAction
 }
 func (r dao11cResponses) UpdateAction(c context.Context, a *store.ResponseAction) error {
 	return r.s.actions.Update(c, a)
+}
+func (r dao11cResponses) CountActionsByBGPConnector(context.Context, int) (int, error) {
+	return 0, nil
 }
 func (r dao11cResponses) DeleteAction(c context.Context, id int) error {
 	return r.s.actions.Delete(c, id)
@@ -211,7 +249,8 @@ func dao11cFixture() *dao11cStore {
 	s.shells = &dao11cRows[store.ShellConnector]{s: s, name: "Shells", rows: []store.ShellConnector{{ID: 1, Name: "n1", Command: "/opt/a.sh", DefaultArgs: "-v", TimeoutMs: 45000, PassStdin: true, Enabled: true}}}
 	s.xdrops = &dao11cRows[store.XDropConnector]{s: s, name: "XDrops", rows: []store.XDropConnector{{ID: 1, Name: "n1", APIURL: "https://old.example/api", APIKey: "K", TimeoutMs: 7000, Enabled: true}}}
 	s.hooks = &dao11cRows[store.WebhookConnector]{s: s, name: "Hooks", rows: []store.WebhookConnector{{ID: 1, Name: "n1", URL: "https://old.example/hook", Method: "PUT", Headers: json.RawMessage(`{"A":"b"}`), TimeoutMs: 3000, Global: true, Enabled: true}}}
-	s.bgps = &dao11cRows[store.BGPConnector]{s: s, name: "BGPs", rows: []store.BGPConnector{{ID: 1, Name: "n1", BGPASN: 65000, Enabled: true}}}
+	s.bgps = &dao11cRows[store.BGPConnector]{s: s, name: "BGPs", rows: []store.BGPConnector{{ID: 1, Name: "n1", BGPASN: 65000, AddressFamily: "auto", Enabled: true, NeighborIP: "192.0.2.1", NeighborASN: 65001}}}
+	s.bgpInstance = &dao11cBGPInstances{s: s}
 	s.prefixes = &dao11cRows[store.WatchPrefix]{s: s, name: "Prefixes", rows: []store.WatchPrefix{{ID: 1, Prefix: "192.0.2.0/24", Enabled: true}}}
 	return s
 }
@@ -303,7 +342,7 @@ func dao11cConnectorBody(kind string) map[string]any {
 	case "xdrop":
 		return map[string]any{"name": "n1", "api_url": "https://old.example/api"}
 	default:
-		return map[string]any{"name": "n1", "bgp_asn": 65000}
+		return map[string]any{"name": "n1", "bgp_asn": 65000, "neighbor_ip": "192.0.2.1", "neighbor_asn": 65001}
 	}
 }
 func dao11cConnectorPath(kind, method string) string {

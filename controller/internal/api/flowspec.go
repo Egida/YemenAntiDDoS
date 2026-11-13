@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -13,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/d80y6/YemenDDoS/controller/internal/action/flowspec"
+	"github.com/d80y6/YemenDDoS/controller/internal/bgp"
 	"github.com/d80y6/YemenDDoS/controller/internal/store"
 )
 
@@ -25,43 +25,22 @@ func jsonOrNil(v any) json.RawMessage {
 	return b
 }
 
-// normalizeVendor maps operator input to a Flowspec CLI dialect.
-func normalizeVendor(v string) (flowspec.Vendor, error) {
-	return flowspec.ParseVendor(v)
-}
-
-// supportedVendors is echoed to the console so its dropdown cannot drift from
-// the generator's actual capabilities.
-func supportedVendors() []gin.H {
-	return []gin.H{
-		{"id": string(flowspec.VendorFRR), "name": "FRR", "executable": true},
-		{"id": string(flowspec.VendorCisco), "name": "Cisco IOS-XR", "executable": false},
-		{"id": string(flowspec.VendorJuniper), "name": "Juniper Junos", "executable": false},
-		{"id": string(flowspec.VendorArista), "name": "Arista EOS", "executable": false},
-	}
-}
-
-// flowspecView is the console read model for one Flowspec announcement: the
-// stored rule plus the exact CLI the connector's vendor expects, so an
-// operator can audit or copy it without reading the generator.
+// flowspecView is the console read model for one Flowspec announcement.
 type flowspecView struct {
-	AnnouncementID   int             `json:"announcement_id"`
-	Prefix           string          `json:"prefix"`
-	RuleName         string          `json:"rule_name"`
-	ConnectorID      int             `json:"connector_id"`
-	ConnectorName    string          `json:"connector_name"`
-	Vendor           string          `json:"vendor"`
-	Executable       bool            `json:"executable"`
-	Status           string          `json:"status"`
-	Refcount         int             `json:"refcount"`
-	ErrorMessage     string          `json:"error_message,omitempty"`
-	AnnouncedAt      time.Time       `json:"announced_at"`
-	DelayStartedAt   *time.Time      `json:"delay_started_at,omitempty"`
-	DelayMinutes     int             `json:"delay_minutes"`
-	Rule             *flowspec.Rule  `json:"rule,omitempty"`
-	Commands         []string        `json:"commands,omitempty"`
-	WithdrawCommands []string        `json:"withdraw_commands,omitempty"`
-	Attacks          []flowspecActor `json:"attacks,omitempty"`
+	AnnouncementID int             `json:"announcement_id"`
+	Prefix         string          `json:"prefix"`
+	RuleName       string          `json:"rule_name"`
+	ConnectorID    int             `json:"connector_id"`
+	ConnectorName  string          `json:"connector_name"`
+	Status         string          `json:"status"`
+	Refcount       int             `json:"refcount"`
+	ErrorMessage   string          `json:"error_message,omitempty"`
+	AnnouncedAt    time.Time       `json:"announced_at"`
+	DelayStartedAt *time.Time      `json:"delay_started_at,omitempty"`
+	DelayMinutes   int             `json:"delay_minutes"`
+	Rule           *flowspec.Rule  `json:"rule,omitempty"`
+	Match          string          `json:"match,omitempty"`
+	Attacks        []flowspecActor `json:"attacks,omitempty"`
 }
 
 type flowspecActor struct {
@@ -71,12 +50,12 @@ type flowspecActor struct {
 	AttachedAt time.Time  `json:"attached_at"`
 }
 
-func vendorIsExecutable(v flowspec.Vendor) bool { return v == flowspec.VendorFRR }
-
 func ruleFromAnnouncement(a store.BGPAnnouncement) flowspec.Rule {
 	var rule flowspec.Rule
 	if strings.TrimSpace(a.RuleSpec) != "" {
-		_ = json.Unmarshal([]byte(a.RuleSpec), &rule)
+		if err := json.Unmarshal([]byte(a.RuleSpec), &rule); err != nil {
+			rule = flowspec.Rule{}
+		}
 	}
 	if rule.Name == "" {
 		rule.Name = a.RouteMap
@@ -91,43 +70,22 @@ func ruleFromAnnouncement(a store.BGPAnnouncement) flowspec.Rule {
 }
 
 func buildFlowspecView(a store.BGPAnnouncement, conn *store.BGPConnector) flowspecView {
-	vendor := flowspec.VendorFRR
 	name := ""
 	if conn != nil {
 		name = conn.Name
-		if v, err := flowspec.ParseVendor(conn.Vendor); err == nil {
-			vendor = v
-		} else {
-			// Surface the stored value instead of relabelling a broken row as
-			// frr: the console would otherwise claim FRR while nothing runs.
-			vendor = flowspec.Vendor(conn.Vendor)
-		}
 	}
 	rule := ruleFromAnnouncement(a)
-	cmds, _ := flowspec.Render(vendor, rule)
-	wcmds, _ := flowspec.RenderWithdraw(vendor, rule)
 	return flowspecView{
-		AnnouncementID:   a.ID,
-		Prefix:           a.Prefix,
-		RuleName:         rule.Name,
-		ConnectorID:      a.ConnectorID,
-		ConnectorName:    name,
-		Vendor:           string(vendor),
-		Executable:       vendorIsExecutable(vendor),
-		Status:           a.Status,
-		Refcount:         a.Refcount,
-		ErrorMessage:     a.ErrorMessage,
-		AnnouncedAt:      a.AnnouncedAt,
-		DelayStartedAt:   a.DelayStartedAt,
-		DelayMinutes:     a.DelayMinutes,
-		Rule:             &rule,
-		Commands:         cmds,
-		WithdrawCommands: wcmds,
+		AnnouncementID: a.ID, Prefix: a.Prefix, RuleName: rule.Name,
+		ConnectorID: a.ConnectorID, ConnectorName: name,
+		Status: a.Status, Refcount: a.Refcount, ErrorMessage: a.ErrorMessage,
+		AnnouncedAt: a.AnnouncedAt, DelayStartedAt: a.DelayStartedAt,
+		DelayMinutes: a.DelayMinutes, Rule: &rule, Match: flowspec.Describe(rule),
 	}
 }
 
-// listFlowspecAnnouncements returns every in-flight Flowspec rule with its
-// rendered CLI and the attacks that keep it alive.
+// listFlowspecAnnouncements returns every in-flight Flowspec rule with the
+// attacks that keep it alive.
 func listFlowspecAnnouncements(deps Dependencies) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		anns, err := deps.Store.BGPAnnouncements().ListActive(c)
@@ -163,17 +121,14 @@ func listFlowspecAnnouncements(deps Dependencies) gin.HandlerFunc {
 			}
 			views = append(views, v)
 		}
-		ok(c, gin.H{"announcements": views, "vendors": supportedVendors()})
+		ok(c, gin.H{"announcements": views})
 	}
 }
 
-// previewFlowspecRule renders a rule without touching FRR. The console uses it
-// for the "inspect" drawer and for pre-flight checks before enabling Flowspec
-// on a connector.
+// previewFlowspecRule validates and describes a rule without touching the speaker.
 func previewFlowspecRule(deps Dependencies) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req struct {
-			Vendor   string  `json:"vendor"`
 			Name     string  `json:"name"`
 			Prefix   string  `json:"prefix" binding:"required"`
 			Protocol *uint8  `json:"protocol"`
@@ -183,11 +138,6 @@ func previewFlowspecRule(deps Dependencies) gin.HandlerFunc {
 			Rate     uint64  `json:"rate_limit"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
-			errResponse(c, http.StatusBadRequest, err.Error())
-			return
-		}
-		vendor, err := normalizeVendor(req.Vendor)
-		if err != nil {
 			errResponse(c, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -203,26 +153,16 @@ func previewFlowspecRule(deps Dependencies) gin.HandlerFunc {
 		if rule.Name == "" {
 			rule.Name = "preview-rule"
 		}
-		cmds, err := flowspec.Render(vendor, rule)
-		if err != nil {
+		if err := rule.Validate(); err != nil {
 			errResponse(c, http.StatusBadRequest, err.Error())
 			return
 		}
-		wcmds, _ := flowspec.RenderWithdraw(vendor, rule)
-		ok(c, gin.H{
-			"vendor":            vendor,
-			"rule":              rule,
-			"commands":          cmds,
-			"withdraw_commands": wcmds,
-			"executable":        vendorIsExecutable(vendor),
-		})
+		ok(c, gin.H{"rule": rule, "match": flowspec.Describe(rule)})
 	}
 }
 
-// forceWithdrawFlowspec removes a Flowspec rule from FRR regardless of the
-// announcement's refcount, mirroring the RTBH orphan force-withdraw path. Every
-// attached attack is detached first so the refcount manager cannot resurrect
-// the rule on its next reconcile.
+// forceWithdrawFlowspec removes a Flowspec rule from the speaker regardless of
+// the announcement's refcount, mirroring the RTBH orphan force-withdraw path.
 func forceWithdrawFlowspec(deps Dependencies) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id, err := strconv.Atoi(c.Param("id"))
@@ -250,24 +190,7 @@ func forceWithdrawFlowspec(deps Dependencies) gin.HandlerFunc {
 			return
 		}
 
-		conn, cErr := deps.Store.BGPConnectors().Get(c, ann.ConnectorID)
-		if cErr != nil {
-			errResponse(c, http.StatusNotFound, "bgp connector not found")
-			return
-		}
-
 		rule := ruleFromAnnouncement(*ann)
-		vendor, vErr := flowspec.ParseVendor(conn.Vendor)
-		if vErr != nil {
-			errResponse(c, http.StatusBadRequest, vErr.Error())
-			return
-		}
-		lines, rErr := flowspec.RenderWithdraw(vendor, rule)
-		if rErr != nil {
-			errResponse(c, http.StatusBadRequest, rErr.Error())
-			return
-		}
-
 		_, gen, err := deps.Store.BGPAnnouncements().ForceWithdraw(c, ann.ID)
 		if err != nil {
 			dbError(c, "", err)
@@ -279,60 +202,27 @@ func forceWithdrawFlowspec(deps Dependencies) gin.HandlerFunc {
 			}
 			deps.ActionEngine.CancelAnnouncementDelay(ann.ID, gen, "flowspec force withdraw")
 		}
-
-		if !vendorIsExecutable(vendor) {
-			if mErr := deps.Store.BGPAnnouncements().MarkWithdrawn(c, ann.ID, gen); mErr != nil {
-				dbError(c, "", mErr)
+		sp := bgp.Shared()
+		if sp != nil {
+			if wErr := sp.WithdrawFlowspec(c, rule); wErr != nil {
+				if mErr := deps.Store.BGPAnnouncements().MarkFailedWithdraw(c, ann.ID, gen, wErr.Error()); mErr != nil {
+					dbError(c, "", mErr)
+					return
+				}
+				log.Printf("api: flowspec force withdraw announcement_id=%d speaker failed: %v", ann.ID, wErr)
+				ok(c, gin.H{"ok": true, "announcement_id": ann.ID, "warning": fmt.Sprintf("speaker error: %v (row marked failed)", wErr)})
 				return
 			}
-			publishAfterChange(c, deps, "flowspec_force_withdraw", fmt.Sprintf("%d", ann.ID), "force_withdraw",
-				jsonOrNil(map[string]any{"announcement_id": ann.ID, "rule": rule.Name, "vendor": vendor}))
-			ok(c, gin.H{
-				"ok":              true,
-				"announcement_id": ann.ID,
-				"executable":      false,
-				"commands":        lines,
-				"warning":         fmt.Sprintf("vendor %s is export-only: apply the generated withdraw manually", vendor),
-			})
-			return
+		} else {
+			log.Printf("api: flowspec force withdraw announcement_id=%d: speaker not configured; DB row withdrawn only", ann.ID)
 		}
-
-		ctx, cancel := context.WithTimeout(c, vtyshHTTPTimeout)
-		defer cancel()
-		args := make([]string, 0, len(lines)*2)
-		for _, line := range lines {
-			if line = strings.TrimSpace(line); line != "" {
-				args = append(args, "-c", line)
-			}
-		}
-		out, vErr2 := runVtyshHTTP(ctx, conn.VtyshPath, args...)
-		if vErr2 != nil {
-			if mErr := deps.Store.BGPAnnouncements().MarkFailedWithdraw(c, ann.ID, gen, vErr2.Error()); mErr != nil {
-				dbError(c, "", mErr)
-				return
-			}
-			log.Printf("api: flowspec force withdraw announcement_id=%d vtysh failed: %v", ann.ID, vErr2)
-			ok(c, gin.H{
-				"ok":              true,
-				"announcement_id": ann.ID,
-				"warning":         fmt.Sprintf("vtysh error: %v (row marked failed)", vErr2),
-				"output":          strings.TrimSpace(string(out)),
-			})
-			return
-		}
-
 		if mErr := deps.Store.BGPAnnouncements().MarkWithdrawn(c, ann.ID, gen); mErr != nil {
 			dbError(c, "", mErr)
 			return
 		}
 		publishAfterChange(c, deps, "flowspec_force_withdraw", fmt.Sprintf("%d", ann.ID), "force_withdraw",
-			jsonOrNil(map[string]any{"announcement_id": ann.ID, "rule": rule.Name, "vendor": vendor}))
-		log.Printf("api: flowspec force withdraw announcement_id=%d rule=%s vendor=%s", ann.ID, rule.Name, vendor)
-		ok(c, gin.H{
-			"ok":              true,
-			"announcement_id": ann.ID,
-			"commands":        lines,
-			"output":          strings.TrimSpace(string(out)),
-		})
+			jsonOrNil(map[string]any{"announcement_id": ann.ID, "rule": rule.Name}))
+		log.Printf("api: flowspec force withdraw announcement_id=%d rule=%s", ann.ID, rule.Name)
+		ok(c, gin.H{"ok": true, "announcement_id": ann.ID})
 	}
 }

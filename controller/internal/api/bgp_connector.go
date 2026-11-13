@@ -1,48 +1,43 @@
 package api
 
 import (
-	"context"
-	"errors"
 	"fmt"
+	"log"
+	"net"
 	"net/http"
-	"os/exec"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
 
-	"github.com/d80y6/YemenDDoS/controller/internal/action/flowspec"
-	"github.com/d80y6/YemenDDoS/controller/internal/store"
 	"github.com/gin-gonic/gin"
+
+	"github.com/d80y6/YemenDDoS/controller/internal/bgp"
+	"github.com/d80y6/YemenDDoS/controller/internal/store"
 )
 
-var vtyshHTTPTimeout = 25 * time.Second
-var vtyshHTTPWaitDelay = 2 * time.Second
-var errVtyshHTTPTimeout = errors.New("vtysh timed out")
-
-func runVtyshHTTP(ctx context.Context, path string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, path, args...)
-	cmd.WaitDelay = vtyshHTTPWaitDelay
-	dl, _ := ctx.Deadline()
-	budget := time.Until(dl)
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		return out, nil
+// syncBGPSpeakerPeers pushes current enabled connectors with peering details
+// into the embedded speaker. Best-effort: DB state is authoritative; the
+// next CRUD operation retries.
+func syncBGPSpeakerPeers(c *gin.Context, deps Dependencies) error {
+	sp := bgp.Shared()
+	if sp == nil {
+		return nil
 	}
-	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
-		err = nil
-	} else if ctx.Err() == context.DeadlineExceeded {
-		err = fmt.Errorf("%w after %s: %w", errVtyshHTTPTimeout, budget, err)
+	conns, err := deps.Store.BGPConnectors().List(c)
+	if err != nil {
+		return err
 	}
-	return out, err
-}
-
-// executableBGPConnector reports whether the local vtysh can drive this
-// connector. Non-FRR vendors are export-only, so probes must not run FRR
-// commands on the host and pretend they tested the remote speaker.
-func executableBGPConnector(conn *store.BGPConnector) bool {
-	v, err := flowspec.ParseVendor(conn.Vendor)
-	return err == nil && v == flowspec.VendorFRR
+	peers := make([]bgp.Peer, 0, len(conns))
+	for _, conn := range conns {
+		if !conn.Enabled || conn.NeighborIP == "" || conn.NeighborASN == 0 {
+			continue
+		}
+		peers = append(peers, bgp.Peer{
+			ConnectorID: conn.ID, Name: conn.Name,
+			NeighborIP: conn.NeighborIP, NeighborASN: uint32(conn.NeighborASN),
+			MD5Password: conn.MD5Password, AddressFamily: conn.AddressFamily,
+		})
+	}
+	return sp.SyncPeers(c, peers)
 }
 
 func listBGPConnectors(deps Dependencies) gin.HandlerFunc {
@@ -64,6 +59,10 @@ func getBGPConnector(deps Dependencies) gin.HandlerFunc {
 			errResponse(c, http.StatusNotFound, "bgp connector not found")
 			return
 		}
+		if conn == nil {
+			errResponse(c, http.StatusNotFound, "bgp connector not found")
+			return
+		}
 		ok(c, conn)
 	}
 }
@@ -72,13 +71,15 @@ func createBGPConnector(deps Dependencies) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req struct {
 			Name          string `json:"name" binding:"required"`
-			VtyshPath     string `json:"vtysh_path"`
 			BGPASN        *int64 `json:"bgp_asn"`
 			AddressFamily string `json:"address_family"`
 			Enabled       *bool  `json:"enabled"`
 			Description   string `json:"description"`
 			Vendor        string `json:"vendor"`
 			Flowspec      *bool  `json:"flowspec_enabled"`
+			NeighborIP    string `json:"neighbor_ip"`
+			NeighborASN   *int64 `json:"neighbor_asn"`
+			MD5Password   string `json:"md5_password"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
 			errResponse(c, http.StatusBadRequest, err.Error())
@@ -92,43 +93,50 @@ func createBGPConnector(deps Dependencies) gin.HandlerFunc {
 			errResponse(c, http.StatusBadRequest, fmt.Sprintf("bgp_asn must be between 1 and 4294967295, got %d", *req.BGPASN))
 			return
 		}
-		if req.VtyshPath == "" {
-			req.VtyshPath = "/usr/bin/vtysh"
-		}
-		// address_family is now auto-detected from the prefix at execution time.
-		// Field kept for backward compatibility but not enforced.
-		if req.AddressFamily == "" {
-			req.AddressFamily = "auto"
-		}
 		enabled := true
 		if req.Enabled != nil {
 			enabled = *req.Enabled
 		}
-		vendor, vErr := normalizeVendor(req.Vendor)
-		if vErr != nil {
-			errResponse(c, http.StatusBadRequest, vErr.Error())
+		neighborASN := 0
+		if req.NeighborASN != nil {
+			if *req.NeighborASN < 1 || *req.NeighborASN > 4294967295 {
+				errResponse(c, http.StatusBadRequest, "neighbor_asn must be between 1 and 4294967295")
+				return
+			}
+			neighborASN = int(*req.NeighborASN)
+		}
+		if req.AddressFamily == "" {
+			req.AddressFamily = "auto"
+		}
+		if req.AddressFamily != "auto" && req.AddressFamily != "ipv4" && req.AddressFamily != "ipv6" {
+			errResponse(c, http.StatusBadRequest, `address_family must be "auto", "ipv4" or "ipv6"`)
+			return
+		}
+		neighborIP := strings.TrimSpace(req.NeighborIP)
+		if enabled && (neighborIP == "" || neighborASN == 0) {
+			errResponse(c, http.StatusBadRequest,
+				"an enabled connector needs neighbor_ip and neighbor_asn (BGP peering details)")
+			return
+		}
+		if neighborIP != "" && net.ParseIP(neighborIP) == nil {
+			errResponse(c, http.StatusBadRequest, "neighbor_ip must be an IP address")
 			return
 		}
 		flowspecEnabled := false
 		if req.Flowspec != nil {
 			flowspecEnabled = *req.Flowspec
 		}
-		// Only FRR is driven over vtysh; other vendors are export-only and need
-		// flowspec_enabled, otherwise a Flowspec action silently becomes RTBH.
-		if vendor != flowspec.VendorFRR && !flowspecEnabled {
-			errResponse(c, http.StatusBadRequest, fmt.Sprintf(
-				"vendor %q is export-only: set flowspec_enabled=true (RTBH cannot be applied to a non-FRR speaker)", vendor))
-			return
-		}
 		conn := &store.BGPConnector{
 			Name:            req.Name,
-			VtyshPath:       req.VtyshPath,
 			BGPASN:          int(*req.BGPASN),
 			AddressFamily:   req.AddressFamily,
 			Enabled:         enabled,
 			Description:     req.Description,
-			Vendor:          string(vendor),
+			Vendor:          req.Vendor,
 			FlowspecEnabled: flowspecEnabled,
+			NeighborIP:      neighborIP,
+			NeighborASN:     neighborASN,
+			MD5Password:     req.MD5Password,
 		}
 		id, err := deps.Store.BGPConnectors().Create(c, conn)
 		if err != nil {
@@ -136,6 +144,9 @@ func createBGPConnector(deps Dependencies) gin.HandlerFunc {
 			return
 		}
 		conn.ID = id
+		if err := syncBGPSpeakerPeers(c, deps); err != nil {
+			log.Printf("api: bgp peer sync after connector create: %v", err)
+		}
 		publishAfterChange(c, deps, "bgp_connector", strconv.Itoa(id), "create", makeDiff(nil, conn))
 		created(c, gin.H{"id": id})
 	}
@@ -149,36 +160,47 @@ func updateBGPConnector(deps Dependencies) gin.HandlerFunc {
 			errResponse(c, http.StatusNotFound, "bgp connector not found")
 			return
 		}
+		if conn == nil {
+			errResponse(c, http.StatusNotFound, "bgp connector not found")
+			return
+		}
 		var req struct {
-			Name          string  `json:"name"`
-			VtyshPath     string  `json:"vtysh_path"`
+			Name          *string `json:"name"`
 			BGPASN        *int64  `json:"bgp_asn"`
-			AddressFamily string  `json:"address_family"`
+			AddressFamily *string `json:"address_family"`
 			Enabled       *bool   `json:"enabled"`
 			Description   *string `json:"description"`
 			Vendor        *string `json:"vendor"`
 			Flowspec      *bool   `json:"flowspec_enabled"`
+			NeighborIP    *string `json:"neighbor_ip"`
+			NeighborASN   *int64  `json:"neighbor_asn"`
+			MD5Password   *string `json:"md5_password"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
 			errResponse(c, http.StatusBadRequest, err.Error())
 			return
 		}
-		old := *conn // snapshot before mutation
-		if req.Name != "" {
-			conn.Name = req.Name
-		}
-		if req.VtyshPath != "" {
-			conn.VtyshPath = req.VtyshPath
+		old := *conn
+		if req.Name != nil && *req.Name != "" {
+			conn.Name = *req.Name
 		}
 		if req.BGPASN != nil {
+			if *req.BGPASN < 1 || *req.BGPASN > 4294967295 {
+				errResponse(c, http.StatusBadRequest, fmt.Sprintf("bgp_asn must be between 1 and 4294967295, got %d", *req.BGPASN))
+				return
+			}
 			conn.BGPASN = int(*req.BGPASN)
 		}
 		if conn.BGPASN < 1 || conn.BGPASN > 4294967295 {
 			errResponse(c, http.StatusBadRequest, fmt.Sprintf("bgp_asn must be between 1 and 4294967295, got %d", conn.BGPASN))
 			return
 		}
-		if req.AddressFamily != "" {
-			conn.AddressFamily = req.AddressFamily
+		if req.AddressFamily != nil && *req.AddressFamily != "" {
+			conn.AddressFamily = *req.AddressFamily
+		}
+		if conn.AddressFamily != "auto" && conn.AddressFamily != "ipv4" && conn.AddressFamily != "ipv6" {
+			errResponse(c, http.StatusBadRequest, `address_family must be "auto", "ipv4" or "ipv6"`)
+			return
 		}
 		if req.Enabled != nil {
 			conn.Enabled = *req.Enabled
@@ -187,26 +209,39 @@ func updateBGPConnector(deps Dependencies) gin.HandlerFunc {
 			conn.Description = *req.Description
 		}
 		if req.Vendor != nil {
-			vendor, vErr := normalizeVendor(*req.Vendor)
-			if vErr != nil {
-				errResponse(c, http.StatusBadRequest, vErr.Error())
-				return
-			}
-			conn.Vendor = string(vendor)
+			conn.Vendor = *req.Vendor
 		}
 		if req.Flowspec != nil {
 			conn.FlowspecEnabled = *req.Flowspec
 		}
-		if vendor, vErr := normalizeVendor(conn.Vendor); vErr != nil || vendor != flowspec.VendorFRR {
-			if !conn.FlowspecEnabled {
-				errResponse(c, http.StatusBadRequest, fmt.Sprintf(
-					"vendor %q is export-only: set flowspec_enabled=true (RTBH cannot be applied to a non-FRR speaker)", conn.Vendor))
+		if req.NeighborIP != nil {
+			conn.NeighborIP = strings.TrimSpace(*req.NeighborIP)
+		}
+		if req.NeighborASN != nil {
+			if *req.NeighborASN < 1 || *req.NeighborASN > 4294967295 {
+				errResponse(c, http.StatusBadRequest, "neighbor_asn must be between 1 and 4294967295")
 				return
 			}
+			conn.NeighborASN = int(*req.NeighborASN)
+		}
+		if req.MD5Password != nil {
+			conn.MD5Password = *req.MD5Password
+		}
+		if conn.Enabled && (conn.NeighborIP == "" || conn.NeighborASN == 0) {
+			errResponse(c, http.StatusBadRequest,
+				"an enabled connector needs neighbor_ip and neighbor_asn (BGP peering details)")
+			return
+		}
+		if conn.NeighborIP != "" && net.ParseIP(conn.NeighborIP) == nil {
+			errResponse(c, http.StatusBadRequest, "neighbor_ip must be an IP address")
+			return
 		}
 		if err := deps.Store.BGPConnectors().Update(c, conn); err != nil {
 			dbError(c, "bgp connector ", err)
 			return
+		}
+		if err := syncBGPSpeakerPeers(c, deps); err != nil {
+			log.Printf("api: bgp peer sync after connector update: %v", err)
 		}
 		if conn.Enabled && deps.ActionEngine != nil {
 			go deps.ActionEngine.SweepEnabledBGPConnector(id)
@@ -219,7 +254,6 @@ func updateBGPConnector(deps Dependencies) gin.HandlerFunc {
 func deleteBGPConnector(deps Dependencies) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id, _ := strconv.Atoi(c.Param("id"))
-		// In-use guard: reject if any response action references this connector
 		count, err := deps.Store.Responses().CountActionsByBGPConnector(c, id)
 		if err != nil {
 			dbError(c, "bgp connector ", err)
@@ -235,13 +269,16 @@ func deleteBGPConnector(deps Dependencies) gin.HandlerFunc {
 			return
 		}
 		if live > 0 {
-			errResponse(c, http.StatusConflict, fmt.Sprintf("connector still has %d announcements in FRR-relevant states", live))
+			errResponse(c, http.StatusConflict, fmt.Sprintf("connector still has %d announcements in flight", live))
 			return
 		}
 		old, _ := deps.Store.BGPConnectors().Get(c, id)
 		if err := deps.Store.BGPConnectors().Delete(c, id); err != nil {
 			dbError(c, "bgp connector ", err)
 			return
+		}
+		if err := syncBGPSpeakerPeers(c, deps); err != nil {
+			log.Printf("api: bgp peer sync after connector delete: %v", err)
 		}
 		if old != nil {
 			publishAfterChange(c, deps, "bgp_connector", strconv.Itoa(id), "delete", makeDiff(old, nil))
@@ -250,75 +287,30 @@ func deleteBGPConnector(deps Dependencies) gin.HandlerFunc {
 	}
 }
 
-// listBGPRoutes returns the current BGP RIB for the connector's address family.
-func listBGPRoutes(deps Dependencies) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		ctx, cancel := context.WithTimeout(c, vtyshHTTPTimeout)
-		defer cancel()
-		id, _ := strconv.Atoi(c.Param("id"))
-		conn, err := deps.Store.BGPConnectors().Get(c, id)
-		if err != nil {
-			errResponse(c, http.StatusNotFound, "bgp connector not found")
-			return
-		}
-		if !executableBGPConnector(conn) {
-			errResponse(c, http.StatusConflict, fmt.Sprintf(
-				"vendor %q is export-only: BGP probes run only for FRR connectors", conn.Vendor))
-			return
-		}
-		// Show both IPv4 and IPv6 BGP RIB — partial success is OK
-		var out4, out6 []byte
-		var err4, err6 error
-		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			out4, err4 = runVtyshHTTP(ctx, conn.VtyshPath, "-c", "show ip bgp ipv4 unicast")
-		}()
-		go func() {
-			defer wg.Done()
-			out6, err6 = runVtyshHTTP(ctx, conn.VtyshPath, "-c", "show ip bgp ipv6 unicast")
-		}()
-		wg.Wait()
-		if err4 != nil && err6 != nil {
-			errResponse(c, http.StatusBadGateway, fmt.Sprintf("vtysh failed: ipv4=%v ipv6=%v", err4, err6))
-			return
-		}
-		var combined string
-		if err4 == nil {
-			combined += string(out4)
-		}
-		if err6 == nil && len(out6) > 0 && !strings.Contains(string(out6), "No BGP prefixes displayed") {
-			if combined != "" {
-				combined += "\n--- IPv6 ---\n"
-			}
-			combined += string(out6)
-		}
-		ok(c, gin.H{"output": combined})
-	}
-}
-
-// testBGPConnector runs "vtysh -c 'show bgp summary'" to verify FRR connectivity.
+// testBGPConnector reports the live session state of this connector's peer.
 func testBGPConnector(deps Dependencies) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		ctx, cancel := context.WithTimeout(c, vtyshHTTPTimeout)
-		defer cancel()
 		id, _ := strconv.Atoi(c.Param("id"))
 		conn, err := deps.Store.BGPConnectors().Get(c, id)
-		if err != nil {
+		if err != nil || conn == nil {
 			errResponse(c, http.StatusNotFound, "bgp connector not found")
 			return
 		}
-		if !executableBGPConnector(conn) {
-			errResponse(c, http.StatusConflict, fmt.Sprintf(
-				"vendor %q is export-only: BGP probes run only for FRR connectors", conn.Vendor))
+		sp := bgp.Shared()
+		if sp == nil {
+			errResponse(c, http.StatusConflict, "bgp speaker not configured (Settings → BGP Instance)")
 			return
 		}
-		out, err := runVtyshHTTP(ctx, conn.VtyshPath, "-c", "show bgp summary")
-		if err != nil {
-			errResponse(c, http.StatusBadGateway, fmt.Sprintf("vtysh failed: %v\n%s", err, strings.TrimSpace(string(out))))
-			return
+		for _, st := range sp.PeerStates(c) {
+			if st.ConnectorID == conn.ID {
+				if st.SessionUp {
+					ok(c, gin.H{"ok": true, "output": "session established with " + st.NeighborIP})
+				} else {
+					ok(c, gin.H{"ok": false, "error": "session down", "output": "session down with " + st.NeighborIP})
+				}
+				return
+			}
 		}
-		ok(c, gin.H{"ok": true, "output": string(out)})
+		errResponse(c, http.StatusConflict, "connector has no peering details configured")
 	}
 }

@@ -3,8 +3,6 @@ package api
 import (
 	"context"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +11,7 @@ import (
 	"time"
 
 	"github.com/d80y6/YemenDDoS/controller/internal/action"
+	"github.com/d80y6/YemenDDoS/controller/internal/bgp"
 	"github.com/d80y6/YemenDDoS/controller/internal/metrics"
 	"github.com/d80y6/YemenDDoS/controller/internal/store"
 	"github.com/gin-gonic/gin"
@@ -47,7 +46,7 @@ func (r *dao11jOrphanRepo) ForceWithdraw(context.Context, int) ([]store.BGPAnnou
 	r.row.Status = "withdrawing"
 	gen := r.row.Gen
 	r.mu.Unlock()
-	// Bubble-local barrier after the committed transition, before vtysh.
+	// Bubble-local barrier after the committed transition, before the speaker withdrawal.
 	close(r.entered)
 	<-r.release
 	return nil, gen, nil
@@ -74,11 +73,10 @@ func (r *dao11jOrphanRepo) MarkWithdrawn(_ context.Context, id, gen int) error {
 
 type dao11jOrphanConnectors struct {
 	store.BGPConnectorRepo
-	path string
 }
 
 func (r dao11jOrphanConnectors) Get(context.Context, int) (*store.BGPConnector, error) {
-	return &store.BGPConnector{ID: 7, BGPASN: 64512, VtyshPath: r.path}, nil
+	return &store.BGPConnector{ID: 7, BGPASN: 64512, NeighborIP: "192.0.2.1", NeighborASN: 64513}, nil
 }
 
 type dao11jOrphanSchedules struct{ store.ScheduledActionRepo }
@@ -90,12 +88,11 @@ func (dao11jOrphanSchedules) ListPending(context.Context) ([]store.ScheduledActi
 type dao11jOrphanStore struct {
 	store.Store
 	anns *dao11jOrphanRepo
-	path string
 }
 
 func (s dao11jOrphanStore) BGPAnnouncements() store.BGPAnnouncementRepo { return s.anns }
 func (s dao11jOrphanStore) BGPConnectors() store.BGPConnectorRepo {
-	return dao11jOrphanConnectors{path: s.path}
+	return dao11jOrphanConnectors{}
 }
 func (s dao11jOrphanStore) ScheduledActions() store.ScheduledActionRepo {
 	return dao11jOrphanSchedules{}
@@ -110,17 +107,11 @@ func dao11jOrphanWant[T comparable](t *testing.T, name string, got, want T) {
 }
 func TestDao11j_R19_OrphanHoldsAnnouncementLock(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		dir := t.TempDir()
-		path, record := filepath.Join(dir, "vtysh"), filepath.Join(dir, "commands")
-		body := "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '" + strings.ReplaceAll(record, "'", "'\\''") + "'\n"
-		if err := os.WriteFile(path, []byte(body), 0700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(record, nil, 0600); err != nil {
-			t.Fatal(err)
-		}
+		fake := &bgp.FakeSpeaker{}
+		bgp.SetShared(fake)
+		t.Cleanup(func() { bgp.SetShared(nil) })
 		r := &dao11jOrphanRepo{row: store.BGPAnnouncement{ID: 1, Prefix: "192.0.2.10/32", RouteMap: "RTBH", ConnectorID: 7, Status: "orphan"}, entered: make(chan struct{}), release: make(chan struct{})}
-		s := dao11jOrphanStore{anns: r, path: path}
+		s := dao11jOrphanStore{anns: r}
 		e := action.NewEngine(s, "auto")
 		w := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(w)
@@ -146,14 +137,11 @@ func TestDao11j_R19_OrphanHoldsAnnouncementLock(t *testing.T) {
 		synctest.Wait()
 		dao11jOrphanWant(t, "R19.Busy", metric()-before, float64(1))
 		dao11jOrphanWant(t, "R19.NoClaim", r.claims.Load(), int64(0))
-		commands, err := os.ReadFile(record)
-		if err != nil {
-			t.Fatal(err)
-		}
-		dao11jOrphanWant(t, "R19.NoVtysh", len(commands), 0)
+		dao11jOrphanWant(t, "R19.NoSpeakerWithdraw", fake.Count("withdraw_blackhole"), 0)
 		close(r.release)
 		<-done
 		synctest.Wait()
+		dao11jOrphanWant(t, "R19.SpeakerWithdraw", fake.Count("withdraw_blackhole"), 1)
 		a, _ := r.Get(context.Background(), 1)
 		dao11jOrphanWant(t, "R19.Status", a.Status, "withdrawn")
 		dao11jOrphanWant(t, "R19.Response", w.Code, 200)
@@ -180,8 +168,11 @@ type dao11jDismissedStore struct {
 func (s dao11jDismissedStore) BGPAnnouncements() store.BGPAnnouncementRepo { return s.r }
 
 func TestDao11j_R19b_OrphanNoopNoTakeover(t *testing.T) {
+	fake := &bgp.FakeSpeaker{}
+	bgp.SetShared(fake)
+	t.Cleanup(func() { bgp.SetShared(nil) })
 	r := &dao11jOrphanRepo{row: store.BGPAnnouncement{ID: 1, Prefix: "192.0.2.10/32", RouteMap: "RTBH", ConnectorID: 7, Status: "orphan", Gen: 7}}
-	s := dao11jDismissedStore{dao11jOrphanStore: dao11jOrphanStore{anns: r, path: "/usr/bin/true"}, r: dao11jDismissedRepo{r}}
+	s := dao11jDismissedStore{dao11jOrphanStore: dao11jOrphanStore{anns: r}, r: dao11jDismissedRepo{r}}
 	e := action.NewEngine(s, "auto")
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)

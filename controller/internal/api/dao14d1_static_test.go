@@ -1,13 +1,16 @@
 package api
 
 import (
+	"fmt"
 	"go/ast"
 	"go/constant"
 	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -223,6 +226,43 @@ func (s *dao14d1Scan) errorValue(lit *ast.CompositeLit) ast.Expr {
 	return nil
 }
 
+type dao14d1Importer struct {
+	compiled types.Importer
+	source   types.Importer
+	exports  map[string]string
+}
+
+func (i *dao14d1Importer) Import(path string) (*types.Package, error) {
+	if _, ok := i.exports[path]; ok {
+		return i.compiled.Import(path)
+	}
+	return i.source.Import(path)
+}
+
+func dao14d1ExportImporter(fset *token.FileSet) types.Importer {
+	exports := map[string]string{}
+	out, err := exec.Command("go", "list", "-export", "-deps", "-f", "{{.ImportPath}}\t{{.Export}}", "github.com/d80y6/YemenDDoS/controller/internal/api").Output()
+	if err == nil {
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			parts := strings.SplitN(line, "\t", 2)
+			if len(parts) == 2 && parts[1] != "" {
+				exports[parts[0]] = parts[1]
+			}
+		}
+	}
+	compiled := importer.ForCompiler(fset, "gc", func(path string) (io.ReadCloser, error) {
+		if export := exports[path]; export != "" {
+			return os.Open(export)
+		}
+		return nil, fmt.Errorf("no export data for %s", path)
+	})
+	return &dao14d1Importer{
+		compiled: compiled,
+		source:   importer.ForCompiler(fset, "source", nil),
+		exports:  exports,
+	}
+}
+
 func TestDao14d1_G3(t *testing.T) {
 	dir := os.Getenv("DAO14D1_STATIC_API_DIR")
 	external := dir != ""
@@ -255,7 +295,7 @@ func TestDao14d1_G3(t *testing.T) {
 		parsed = append(parsed, file)
 	}
 	info := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}, Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}, Selections: map[*ast.SelectorExpr]*types.Selection{}}
-	config := types.Config{Importer: importer.ForCompiler(fset, "source", nil)}
+	config := types.Config{Importer: dao14d1ExportImporter(fset)}
 	pkg, err := config.Check("github.com/d80y6/YemenDDoS/controller/internal/api", fset, parsed, info)
 	if err != nil {
 		t.Fatalf("type-check scanner input: %v", err)
@@ -274,7 +314,7 @@ func TestDao14d1_G3(t *testing.T) {
 	if errResponseObject == nil {
 		t.Fatal("missing errResponse object")
 	}
-	white := map[string]int{"queryXDropDelivery/S1": 0, "listBGPRoutes/S1": 0, "testBGPConnector/S1": 0, "testWebhookConnector/S2": 0, "testXDropConnector/S2": 0}
+	white := map[string]int{"queryXDropDelivery/S1": 0, "testWebhookConnector/S2": 0, "testXDropConnector/S2": 0}
 	var violations []string
 	report := func(rule, name string, node ast.Node) {
 		violations = append(violations, rule+" "+fset.Position(node.Pos()).String()+" "+name)

@@ -231,10 +231,10 @@ type ActionExecutionLogView struct {
 	store.ActionExecutionLog
 	// BGPRole is populated for action_type=bgp on_detected entries. Values:
 	//   "triggered"       — this attack was the first to attach to the
-	//                       announcement (the vtysh announce call was its
+	//                       announcement (the speaker announce call was its
 	//                       side effect).
 	//   "attached_shared" — this attack joined an existing announcement
-	//                       (no vtysh announce; refcount incremented).
+	//                       (no speaker announce; refcount incremented).
 	//   ""                — either not BGP, not on_detected, or the
 	//                       announcement row could not be found.
 	BGPRole string `json:"bgp_role,omitempty"`
@@ -293,12 +293,12 @@ func enrichActionLogsWithBGPRole(ctx context.Context, s store.Store, attackID in
 	}
 
 	// For each announcement, determine the IDENTITY of the attach that
-	// actually triggered the vtysh announce FOR THE CURRENT CYCLE. Three
+	// actually triggered the speaker announce FOR THE CURRENT CYCLE. Three
 	// things at play:
 	//
 	//   1. Time equality is unstable — Postgres timestamp precision can
 	//      collide for attaches inside the same transaction window, which
-	//      would tag multiple rows as "triggered" despite only one vtysh
+	//      would tag multiple rows as "triggered" despite only one speaker
 	//      side-effect firing. Sort tie-breaks by attack_id ASC (Attach's
 	//      SELECT FOR UPDATE serializes, so earliest attached_at + lowest
 	//      attack_id matches the actual insert order).
@@ -391,7 +391,7 @@ func enrichActionLogsWithBGPRole(ctx context.Context, s store.Store, attackID in
 }
 
 // triggerIdentity is the (attack_id, action_id) tuple of the attach that
-// triggered the vtysh announce for an announcement's current cycle.
+// triggered the speaker announce for an announcement's current cycle.
 type triggerIdentity struct {
 	AttackID int
 	ActionID int // 0 if attach carried nil action_id (rare, recovery paths)

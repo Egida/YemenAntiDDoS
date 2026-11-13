@@ -230,8 +230,11 @@ func NewRouter(deps Dependencies) *gin.Engine {
 			settings.PUT("/bgp-connectors/:id", updateBGPConnector(deps))
 			settings.DELETE("/bgp-connectors/:id", deleteBGPConnector(deps))
 			settings.POST("/bgp-connectors/:id/test", testBGPConnector(deps))
-			settings.GET("/bgp-connectors/:id/routes", listBGPRoutes(deps))
+			settings.GET("/bgp-instance", getBGPInstance(deps))
+			settings.PUT("/bgp-instance", updateBGPInstance(deps))
 		}
+
+		api.GET("/bgp/peers", listBGPPeers(deps))
 
 		// v3.0: Flow Listeners + Sources
 		api.GET("/flow-listeners", listFlowListeners(deps))
