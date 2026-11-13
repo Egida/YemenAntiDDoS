@@ -655,7 +655,14 @@ func (e *Engine) retryBGPAnnounce(ann store.BGPAnnouncement) {
 	// permanent). Mirrors reconcileAnnouncing.
 	var aErr error
 	if ann.Kind == "flowspec" {
-		aErr = sp.AnnounceFlowspec(ctx, flowspecRuleFromSpec(ann))
+		rule, rErr := flowspecRuleFromSpec(ann)
+		if rErr != nil {
+			// Leave the row announcing: a broadened fallback rule would not
+			// match the announced path.
+			log.Printf("WARN action: retry announce announcement_id=%d prefix=%q gen=%d: %v; leaving announcing for runtime reconcile", ann.ID, ann.Prefix, ann.Gen, rErr)
+			return
+		}
+		aErr = sp.AnnounceFlowspec(ctx, rule)
 	} else {
 		aErr = sp.AnnounceBlackhole(ctx, ann.Prefix)
 	}
@@ -1163,6 +1170,12 @@ func (e *Engine) ForceRemove(ctx context.Context, attackID, actionID, connectorI
 			return fmt.Errorf("lookup announcement: %w", lerr)
 		}
 		if ann == nil {
+			if conn.FlowspecEnabled {
+				// No row means no rule_spec: the flowspec key cannot be
+				// reconstructed, and withdrawing a blackhole path would
+				// remove nothing while the rule stays installed.
+				return fmt.Errorf("bgp announcement not found for flowspec connector %d; cannot reconstruct flowspec rule", connectorID)
+			}
 			sp := bgp.Shared()
 			if sp == nil {
 				return fmt.Errorf("bgp speaker not configured")

@@ -85,11 +85,24 @@ const bgpAnnouncementCols = `id, prefix, route_map, connector_id, first_action_i
 	status, refcount, announced_at, delay_started_at, delay_minutes, withdrawn_at,
 	COALESCE(error_message, ''), COALESCE(kind, 'rtbh'), COALESCE(rule_spec, ''), created_at, gen`
 
+// bgpAnnouncementScanCount is the number of columns selected by
+// bgpAnnouncementCols. Every scan of that column list must provide exactly
+// this many destinations.
+const bgpAnnouncementScanCount = 16
+
+// bgpAnnouncementScanTargets returns the scan destinations matching
+// bgpAnnouncementCols, in column order. scanOne and list share it so the two
+// cannot drift apart: pgx rejects a scan whose destination count differs from
+// the selected column count.
+func bgpAnnouncementScanTargets(a *store.BGPAnnouncement) []any {
+	return []any{&a.ID, &a.Prefix, &a.RouteMap, &a.ConnectorID, &a.FirstActionID,
+		&a.Status, &a.Refcount, &a.AnnouncedAt, &a.DelayStartedAt, &a.DelayMinutes,
+		&a.WithdrawnAt, &a.ErrorMessage, &a.Kind, &a.RuleSpec, &a.CreatedAt, &a.Gen}
+}
+
 func (r *bgpAnnouncementRepo) scanOne(row pgx.Row) (*store.BGPAnnouncement, error) {
 	var a store.BGPAnnouncement
-	err := row.Scan(&a.ID, &a.Prefix, &a.RouteMap, &a.ConnectorID, &a.FirstActionID,
-		&a.Status, &a.Refcount, &a.AnnouncedAt, &a.DelayStartedAt, &a.DelayMinutes,
-		&a.WithdrawnAt, &a.ErrorMessage, &a.Kind, &a.RuleSpec, &a.CreatedAt, &a.Gen)
+	err := row.Scan(bgpAnnouncementScanTargets(&a)...)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -732,9 +745,7 @@ func (r *bgpAnnouncementRepo) list(ctx context.Context, where string, args ...an
 	var out []store.BGPAnnouncement
 	for rows.Next() {
 		var a store.BGPAnnouncement
-		if err := rows.Scan(&a.ID, &a.Prefix, &a.RouteMap, &a.ConnectorID, &a.FirstActionID,
-			&a.Status, &a.Refcount, &a.AnnouncedAt, &a.DelayStartedAt, &a.DelayMinutes,
-			&a.WithdrawnAt, &a.ErrorMessage, &a.CreatedAt, &a.Gen); err != nil {
+		if err := rows.Scan(bgpAnnouncementScanTargets(&a)...); err != nil {
 			return nil, err
 		}
 		out = append(out, a)

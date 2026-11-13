@@ -614,9 +614,16 @@ func performBGPWithdraw(ctx context.Context, s store.Store, conn *store.BGPConne
 	} else if ann.Kind == "flowspec" {
 		// Flowspec announcements withdraw the stored rule — its match
 		// components cannot be derived from the prefix alone.
-		rule := flowspecRuleFromSpec(*ann)
-		requestBody = flowspec.Describe(rule)
-		wErr = sp.WithdrawFlowspec(ctx, rule)
+		rule, rErr := flowspecRuleFromSpec(*ann)
+		if rErr != nil {
+			// Fail closed: the fallback rule is broader than the announced
+			// path, and its key differs, so withdrawing it would leave the
+			// original path installed.
+			wErr = rErr
+		} else {
+			requestBody = flowspec.Describe(rule)
+			wErr = sp.WithdrawFlowspec(ctx, rule)
+		}
 	} else {
 		wErr = sp.WithdrawBlackhole(ctx, dstIP)
 	}
@@ -690,7 +697,13 @@ func RecoverBGPRoutes(ctx context.Context, s store.Store) {
 			continue
 		}
 		if ann.Kind == "flowspec" {
-			rule := flowspecRuleFromSpec(ann)
+			rule, rErr := flowspecRuleFromSpec(ann)
+			if rErr != nil {
+				// Skip the row: a broadened fallback rule would not match the
+				// announced path.
+				log.Printf("bgp recovery: flowspec announcement_id=%d: %v", ann.ID, rErr)
+				continue
+			}
 			if err := sp.AnnounceFlowspec(ctx, rule); err != nil {
 				log.Printf("bgp recovery: flowspec announcement_id=%d: %v", ann.ID, err)
 			}
@@ -703,13 +716,16 @@ func RecoverBGPRoutes(ctx context.Context, s store.Store) {
 }
 
 // flowspecRuleFromSpec rebuilds the rule from a flowspec announcement row.
-// Unparseable rule_spec falls back to the row's identity fields; the failure
-// is logged so a corrupt row is visible instead of silently broadening.
-func flowspecRuleFromSpec(ann store.BGPAnnouncement) flowspec.Rule {
+// An empty rule_spec yields the row's identity fields (the legitimate empty
+// case). A malformed rule_spec is an error: announcing or withdrawing the
+// destination-only fallback would install a broader path than the one that
+// was announced, and its encode key differs from the announced path's key.
+func flowspecRuleFromSpec(ann store.BGPAnnouncement) (flowspec.Rule, error) {
 	var rule flowspec.Rule
 	if strings.TrimSpace(ann.RuleSpec) != "" {
 		if err := json.Unmarshal([]byte(ann.RuleSpec), &rule); err != nil {
-			log.Printf("WARN bgp: announcement %d rule_spec unmarshal failed, using fallback rule: %v", ann.ID, err)
+			log.Printf("WARN bgp: announcement %d rule_spec unmarshal failed: %v", ann.ID, err)
+			return flowspec.Rule{}, fmt.Errorf("announcement %d rule_spec invalid: %w", ann.ID, err)
 		}
 	}
 	if rule.Name == "" {
@@ -721,5 +737,5 @@ func flowspecRuleFromSpec(ann store.BGPAnnouncement) flowspec.Rule {
 	if rule.Action == "" {
 		rule.Action = flowspec.ActionDrop
 	}
-	return rule
+	return rule, nil
 }

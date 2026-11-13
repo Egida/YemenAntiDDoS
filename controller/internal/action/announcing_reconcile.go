@@ -73,7 +73,13 @@ func (e *Engine) reconcileAnnouncing(ctx context.Context, ann store.BGPAnnouncem
 		return false
 	}
 	if ann.Kind == "flowspec" {
-		err = sp.AnnounceFlowspec(ctx, flowspecRuleFromSpec(ann))
+		rule, rErr := flowspecRuleFromSpec(ann)
+		if rErr != nil {
+			metrics.BGPAnnouncingReconcile.WithLabelValues("probe_error").Inc()
+			log.Printf("ERROR action: announcing reconcile announcement_id=%d: %v", ann.ID, rErr)
+			return false
+		}
+		err = sp.AnnounceFlowspec(ctx, rule)
 	} else {
 		err = sp.AnnounceBlackhole(ctx, ann.Prefix)
 	}

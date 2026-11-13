@@ -328,7 +328,21 @@ func flowspecWithdraw(ctx context.Context, s store.Store, conn *store.BGPConnect
 			ExternalRuleID: externalRuleID, ExecutedAt: time.Now(),
 		}, errors.New(msg)
 	}
-	rebuilt := flowspecRuleFromSpec(*ann)
+	rebuilt, rErr := flowspecRuleFromSpec(*ann)
+	if rErr != nil {
+		// Fail closed: the fallback rule is broader than the announced path
+		// and its key differs, so withdrawing it would leave the original
+		// path installed.
+		msg := rErr.Error()
+		markWithdrawFailed(ctx, s, result.AnnouncementID, result.Gen, msg)
+		return &store.ActionExecutionLog{
+			AttackID: attackDBID, ActionID: act.ID, ActionType: "bgp",
+			TriggerPhase: triggerPhase, ResponseName: responseName,
+			ConnectorName: conn.Name, ConnectorID: &connID,
+			Status: "failed", ErrorMessage: msg,
+			ExternalRuleID: externalRuleID, ExecutedAt: time.Now(),
+		}, rErr
+	}
 	rule.Protocol = rebuilt.Protocol
 	rule.DstPort = rebuilt.DstPort
 	rule.SrcPort = rebuilt.SrcPort
