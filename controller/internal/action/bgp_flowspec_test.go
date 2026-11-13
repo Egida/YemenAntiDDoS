@@ -1,9 +1,11 @@
 package action
 
 import (
+	"context"
 	"testing"
 
 	"github.com/d80y6/YemenDDoS/controller/internal/action/flowspec"
+	"github.com/d80y6/YemenDDoS/controller/internal/bgp"
 	"github.com/d80y6/YemenDDoS/controller/internal/store"
 )
 
@@ -35,32 +37,17 @@ func TestProtocolForDecoder(t *testing.T) {
 		{"unknown_family", 0, false},
 		{"", 0, false},
 	}
-	for _, c := range cases {
-		got := protocolForDecoder(c.family)
-		if c.any {
-			if got == nil || *got != c.want {
-				t.Errorf("protocolForDecoder(%q) = %v, want %d", c.family, got, c.want)
+	for _, tc := range cases {
+		got := protocolForDecoder(tc.family)
+		if tc.any {
+			if got == nil || *got != tc.want {
+				t.Errorf("protocolForDecoder(%q) = %v, want %d", tc.family, got, tc.want)
 			}
 			continue
 		}
 		if got != nil {
-			t.Errorf("protocolForDecoder(%q) = %d, want nil", c.family, *got)
+			t.Errorf("protocolForDecoder(%q) = %d, want nil", tc.family, *got)
 		}
-	}
-}
-
-func TestConnectorVendorDefaultsToFRRAndFailsClosed(t *testing.T) {
-	for _, in := range []string{"", "frr", "FRR"} {
-		got, err := connectorVendor(&store.BGPConnector{Vendor: in})
-		if err != nil || got != flowspec.VendorFRR {
-			t.Errorf("connectorVendor(%q) = %q, %v; want frr", in, got, err)
-		}
-	}
-	if got, err := connectorVendor(&store.BGPConnector{Vendor: "cisco_xr"}); err != nil || got != flowspec.VendorCisco {
-		t.Errorf("connectorVendor(cisco_xr) = %q, %v; want cisco_xr", got, err)
-	}
-	if got, err := connectorVendor(&store.BGPConnector{ID: 7, Vendor: "bogus"}); err == nil || got != "" {
-		t.Errorf("connectorVendor(bogus) = %q, %v; want empty vendor and error", got, err)
 	}
 }
 
@@ -77,5 +64,105 @@ func TestFlowspecRuleForNarrowsMatch(t *testing.T) {
 	}
 	if err := rule.Validate(); err != nil {
 		t.Fatalf("generated rule must validate: %v", err)
+	}
+}
+
+func TestFlowspecExecutionUsesSpeaker(t *testing.T) {
+	s, act, _ := dao3BGPFixture(t)
+	fake := bgp.Shared().(*bgp.FakeSpeaker)
+	conn := s.conn
+	conn.FlowspecEnabled = true
+	prefix := "198.51.100.7/32"
+	attack := &store.Attack{DstIP: prefix, DecoderFamily: "tcp_syn"}
+
+	log, err := executeBGPFlowspec(context.Background(), s, &conn, act, attack, prefix, 20, "test", "on_detected")
+	if err != nil || log == nil || log.Status != "success" {
+		t.Fatalf("announce log=%+v err=%v", log, err)
+	}
+	if fake.Count("announce_flowspec") != 1 || len(fake.Rules) != 1 {
+		t.Fatalf("announce calls=%d rules=%d", fake.Count("announce_flowspec"), len(fake.Rules))
+	}
+	if got := fake.Rules[0].Prefix; got != prefix {
+		t.Fatalf("announced prefix=%q want %q", got, prefix)
+	}
+	wantBody := "destination 198.51.100.7/32, protocol tcp, drop (traffic-rate 0)"
+	if log.RequestBody != wantBody {
+		t.Fatalf("request body=%q want %q", log.RequestBody, wantBody)
+	}
+
+	log, err = executeBGPFlowspec(context.Background(), s, &conn, act, nil, prefix, 20, "test", "on_expired")
+	if err != nil || log == nil || log.Status != "success" {
+		t.Fatalf("withdraw log=%+v err=%v", log, err)
+	}
+	if fake.Count("withdraw_flowspec") != 1 {
+		t.Fatalf("withdraw calls=%d want 1", fake.Count("withdraw_flowspec"))
+	}
+}
+
+func TestFlowspecWithdrawUsesAnnouncedRule(t *testing.T) {
+	s, act, _ := dao3BGPFixture(t)
+	fake := bgp.Shared().(*bgp.FakeSpeaker)
+	conn := s.conn
+	conn.FlowspecEnabled = true
+	prefix := "198.51.100.7/32"
+	attack := &store.Attack{DstIP: prefix, DecoderFamily: "tcp_syn"}
+
+	if _, err := executeBGPFlowspec(context.Background(), s, &conn, act, attack, prefix, 20, "test", "on_detected"); err != nil {
+		t.Fatalf("announce: %v", err)
+	}
+	if _, err := executeBGPFlowspec(context.Background(), s, &conn, act, nil, prefix, 20, "test", "on_expired"); err != nil {
+		t.Fatalf("withdraw: %v", err)
+	}
+	if len(fake.Rules) != 2 {
+		t.Fatalf("rules=%d want 2", len(fake.Rules))
+	}
+	withdrawn := fake.Rules[1]
+	if withdrawn.Protocol == nil || *withdrawn.Protocol != 6 {
+		t.Fatalf("withdrawn rule protocol=%v want 6", withdrawn.Protocol)
+	}
+	if withdrawn.Prefix != prefix || withdrawn.Name != fake.Rules[0].Name {
+		t.Fatalf("withdrawn rule identity=%+v", withdrawn)
+	}
+}
+
+func TestRTBHExecutionUsesSpeaker(t *testing.T) {
+	s, act, _ := dao3BGPFixture(t)
+	fake := bgp.Shared().(*bgp.FakeSpeaker)
+	prefix := "192.0.2.10/32"
+	attack := &store.Attack{DstIP: "192.0.2.10"}
+
+	log, err := executeBGP(context.Background(), s, nil, act, attack, "detected", prefix, "test", "on_detected", 20, nil)
+	if err != nil || log == nil || log.Status != "success" {
+		t.Fatalf("announce log=%+v err=%v", log, err)
+	}
+	if fake.Count("announce_blackhole") != 1 || len(fake.Prefixes) != 1 || fake.Prefixes[0] != prefix {
+		t.Fatalf("announce calls=%d prefixes=%v", fake.Count("announce_blackhole"), fake.Prefixes)
+	}
+}
+
+func TestExecuteBGPWithoutSpeakerSkips(t *testing.T) {
+	s, act, _ := dao3BGPFixture(t)
+	bgp.SetShared(nil)
+	attack := &store.Attack{DstIP: "192.0.2.10"}
+	log, err := executeBGP(context.Background(), s, nil, act, attack, "detected", "192.0.2.10", "test", "on_detected", 20, nil)
+	if err != nil || log == nil {
+		t.Fatalf("log=%+v err=%v", log, err)
+	}
+	if log.Status != "skipped" || log.SkipReason != SkipReasonSpeakerNotConfigured {
+		t.Fatalf("status=%q skip_reason=%q", log.Status, log.SkipReason)
+	}
+}
+
+func TestRecoverBGPRoutesRestoresSpeakerPaths(t *testing.T) {
+	s, _, _ := dao3BGPFixture(t)
+	fake := bgp.Shared().(*bgp.FakeSpeaker)
+	s.ann.rows = []store.BGPAnnouncement{
+		{ID: 1, Prefix: "192.0.2.10/32", RouteMap: "RTBH", ConnectorID: 7, Status: "active"},
+		{ID: 2, Prefix: "198.51.100.0/24", RouteMap: "xsight-flow", ConnectorID: 7, Status: "delayed", Kind: "flowspec", RuleSpec: `{"Name":"xsight-flow","Prefix":"198.51.100.0/24","Action":"drop"}`},
+	}
+
+	RecoverBGPRoutes(context.Background(), s)
+	if fake.Count("announce_blackhole") != 1 || fake.Count("announce_flowspec") != 1 {
+		t.Fatalf("announce calls=%d flowspec calls=%d", fake.Count("announce_blackhole"), fake.Count("announce_flowspec"))
 	}
 }

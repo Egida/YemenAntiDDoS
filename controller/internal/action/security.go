@@ -7,26 +7,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strings"
 	"syscall"
-	"unicode"
 )
-
-func vtyshToken(s string) error {
-	if s == "" || strings.IndexFunc(s, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
-		return fmt.Errorf("unsafe vtysh token")
-	}
-	return nil
-}
-
-func vtyshTokens(prefix, routeMap string) error {
-	for field, value := range map[string]string{"prefix": prefix, "route-map": routeMap} {
-		if vtyshToken(value) != nil {
-			return fmt.Errorf("unsafe vtysh token: %s", field)
-		}
-	}
-	return nil
-}
 
 // WebhookTransport is shared by action delivery and the connector test endpoint.
 var WebhookTransport http.RoundTripper = func() *http.Transport {

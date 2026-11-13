@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/d80y6/YemenDDoS/controller/internal/bgp"
 	"github.com/d80y6/YemenDDoS/controller/internal/metrics"
 	"github.com/d80y6/YemenDDoS/controller/internal/store"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -29,7 +30,6 @@ type dao12hContextConnector struct {
 }
 
 func (r *dao12hContextConnector) Get(ctx context.Context, _ int) (*store.BGPConnector, error) {
-	// Snapshot inside Get: the independent context is canceled on return.
 	r.received, r.calledAt, r.errAtGet = ctx, time.Now(), ctx.Err()
 	r.deadline, r.hasDeadline = ctx.Deadline()
 	return nil, errors.New("contract connector lookup failure")
@@ -56,12 +56,8 @@ func TestDao12h_C1_IndependentContext(t *testing.T) {
 
 func TestDao12h_C2_StaleReturnsTrue(t *testing.T) {
 	base, _, _ := dao3BGPFixture(t)
-	path, _ := dao12bScript(t, `case "$2" in
-"show running-config") printf 'router bgp 64512\n address-family ipv4 unicast\n  network 192.0.2.10/32 route-map RTBH\n exit-address-family\n';;
-"show bgp ipv4 unicast json") printf '%s\n' '{"routes":{"192.0.2.10/32":[{"weight":32768,"path":"","peerId":"(unspec)","nexthops":[{"ip":"0.0.0.0"}]}]}}';;
-*) exit 3;;
-esac`)
-	base.conn.VtyshPath = path
+	fake := &bgp.FakeSpeaker{}
+	bgp.SetShared(fake)
 	s := dao12hContractStore{base, base.BGPConnectors(), dao12hStaleAnnouncement{base.BGPAnnouncements()}}
 	counter := func(outcome string) float64 {
 		return testutil.ToFloat64(metrics.BGPAnnouncingReconcile.WithLabelValues(outcome))
@@ -71,18 +67,5 @@ esac`)
 	dao12bWant(t, "C2.ReturnsTrue", got, got)
 	dao12bWant(t, "C2.StaleDelta", counter("stale")-stale == 1, counter("stale")-stale)
 	dao12bWant(t, "C2.NoStateWriteError", counter("state_write_error")-failed == 0, counter("state_write_error")-failed)
-}
-
-func TestDao12h_C3_InvalidPrefix(t *testing.T) {
-	ann := store.BGPAnnouncement{Prefix: "not-a-prefix", RouteMap: "RTBH"}
-	config := "router bgp 64512\n address-family ipv4 unicast\n  network not-a-prefix route-map RTBH\n exit-address-family\n"
-	rib := `{"routes":{"not-a-prefix":[{"weight":32768,"path":"","peerId":"(unspec)","nexthops":[{"ip":"0.0.0.0"}]}]}}`
-	dao12bWant(t, "C3.ConfigRejected", !announcingConfigContains(config, 64512, ann), config)
-	present, err := announcingRIBContains(rib, ann.Prefix)
-	dao12bWant(t, "C3.RIBRejected", !present && err == nil, []any{present, err})
-	ann.Prefix = "192.0.2.10/32"
-	config = "router bgp 64512\n address-family ipv4 unicast\n  network 192.0.2.10/32 route-map RTBH\n exit-address-family\n"
-	rib = `{"routes":{"192.0.2.10/32":[{"weight":32768,"path":"","peerId":"(unspec)","nexthops":[{"ip":"0.0.0.0"}]}]}}`
-	present, err = announcingRIBContains(rib, ann.Prefix)
-	dao12bWant(t, "C3.PositiveControl", announcingConfigContains(config, 64512, ann) && present && err == nil, []any{present, err})
+	dao12bWant(t, "C2.Reannounced", fake.Count("announce_blackhole") == 1, fake.Count("announce_blackhole"))
 }

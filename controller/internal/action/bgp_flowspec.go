@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/d80y6/YemenDDoS/controller/internal/action/flowspec"
+	"github.com/d80y6/YemenDDoS/controller/internal/bgp"
 	"github.com/d80y6/YemenDDoS/controller/internal/metrics"
 	"github.com/d80y6/YemenDDoS/controller/internal/store"
 )
@@ -65,25 +66,9 @@ func flowspecRuleFor(dstIP string, attack *store.Attack) flowspec.Rule {
 	return r
 }
 
-// connectorVendor maps the stored vendor to a renderer. An empty or "frr"
-// value is the documented default for rows created before Flowspec existed.
-// Anything else that fails to parse is a data error (the API rejects it on
-// write), so it fails closed instead of silently executing FRR syntax on a
-// speaker that may not understand it.
-func connectorVendor(conn *store.BGPConnector) (flowspec.Vendor, error) {
-	v, err := flowspec.ParseVendor(conn.Vendor)
-	if err != nil {
-		log.Printf("ERROR action: bgp connector %d has unknown vendor %q: %v", conn.ID, conn.Vendor, err)
-		return "", fmt.Errorf("bgp connector %d: %w", conn.ID, err)
-	}
-	return v, nil
-}
-
 // executeBGPFlowspec is the Flowspec counterpart of bgpAnnounce/bgpWithdraw.
 // It shares the refcounted announcement lifecycle with RTBH but stores
-// Kind="flowspec" plus the rendered rule so the console can inspect and
-// force-withdraw it. Only the FRR vendor is executed automatically; the
-// Cisco/Juniper/Arista templates are generated for manual application.
+// Kind="flowspec" plus the rule so the console can inspect and force-withdraw it.
 func executeBGPFlowspec(ctx context.Context, s store.Store, conn *store.BGPConnector, act store.ResponseAction,
 	attack *store.Attack, dstIP string, attackDBID int, responseName, triggerPhase string) (*store.ActionExecutionLog, error) {
 
@@ -169,129 +154,50 @@ func flowspecAnnounce(ctx context.Context, s store.Store, conn *store.BGPConnect
 		}, nil
 	}
 
-	vendor, vErr := connectorVendor(conn)
-	if vErr != nil {
-		markFlowspecAnnounceFailed(ctx, s, attachResult, vErr)
+	sp := bgp.Shared()
+	if sp == nil {
+		msg := "bgp speaker not configured: set up Settings → BGP Instance first"
+		markFlowspecAnnounceFailed(ctx, s, attachResult, errors.New(msg))
 		return &store.ActionExecutionLog{
-			AttackID:       attackDBID,
-			ActionID:       act.ID,
-			ActionType:     "bgp",
-			TriggerPhase:   triggerPhase,
-			ResponseName:   responseName,
-			ConnectorName:  conn.Name,
-			ConnectorID:    &connID,
-			Status:         "failed",
-			ErrorMessage:   vErr.Error(),
-			ExternalRuleID: externalRuleID,
-			ExecutedAt:     time.Now(),
-		}, vErr
-	}
-	lines, rErr := flowspec.Render(vendor, rule)
-	if rErr != nil {
-		markFlowspecAnnounceFailed(ctx, s, attachResult, rErr)
-		return &store.ActionExecutionLog{
-			AttackID:       attackDBID,
-			ActionID:       act.ID,
-			ActionType:     "bgp",
-			TriggerPhase:   triggerPhase,
-			ResponseName:   responseName,
-			ConnectorName:  conn.Name,
-			ConnectorID:    &connID,
-			Status:         "failed",
-			ErrorMessage:   fmt.Sprintf("render: %v", rErr),
-			ExternalRuleID: externalRuleID,
-			ExecutedAt:     time.Now(),
-		}, rErr
-	}
-	cmd := strings.Join(lines, "\n")
-
-	if vendor != flowspec.VendorFRR {
-		errMsg := fmt.Sprintf("vendor %s is export-only: rule generated for manual application", vendor)
-		markFlowspecAnnounceFailed(ctx, s, attachResult, errors.New(errMsg))
-		log.Printf("action: flowspec export-only announcement_id=%d vendor=%s rule=%s",
-			attachResult.AnnouncementID, vendor, rule.Name)
-		return &store.ActionExecutionLog{
-			AttackID:       attackDBID,
-			ActionID:       act.ID,
-			ActionType:     "bgp",
-			TriggerPhase:   triggerPhase,
-			ResponseName:   responseName,
-			ConnectorName:  conn.Name,
-			ConnectorID:    &connID,
-			Status:         "failed",
-			ErrorMessage:   errMsg,
-			RequestBody:    cmd,
-			ExternalRuleID: externalRuleID,
-			ExecutedAt:     time.Now(),
-		}, nil
-	}
-
-	if err := vtyshTokens(rule.Prefix, rule.Name); err != nil {
-		markFlowspecAnnounceFailed(ctx, s, attachResult, err)
-		return &store.ActionExecutionLog{
-			AttackID:       attackDBID,
-			ActionID:       act.ID,
-			ActionType:     "bgp",
-			TriggerPhase:   triggerPhase,
-			ResponseName:   responseName,
-			ConnectorName:  conn.Name,
-			ConnectorID:    &connID,
-			Status:         "failed",
-			ErrorMessage:   err.Error(),
-			ExternalRuleID: externalRuleID,
-			ExecutedAt:     time.Now(),
-		}, err
+			AttackID: attackDBID, ActionID: act.ID, ActionType: "bgp",
+			TriggerPhase: triggerPhase, ResponseName: responseName,
+			ConnectorName: conn.Name, ConnectorID: &connID,
+			Status: "failed", ErrorMessage: msg,
+			ExternalRuleID: externalRuleID, ExecutedAt: time.Now(),
+		}, errors.New(msg)
 	}
 
 	t0 := time.Now()
-	out, vErr := runVtysh(ctx, conn.VtyshPath, cmd)
+	aErr := sp.AnnounceFlowspec(ctx, rule)
 	durationMs := int(time.Since(t0).Milliseconds())
-	if vErr != nil {
-		metrics.RecordVtysh("announce", "failed")
-		markFlowspecAnnounceFailed(ctx, s, attachResult, vErr)
-		log.Printf("action: flowspec announce failed announcement_id=%d: %v output=%s",
-			attachResult.AnnouncementID, vErr, out)
+	if aErr != nil {
+		markFlowspecAnnounceFailed(ctx, s, attachResult, aErr)
+		log.Printf("action: flowspec announce failed announcement_id=%d: %v",
+			attachResult.AnnouncementID, aErr)
 		return &store.ActionExecutionLog{
-			AttackID:       attackDBID,
-			ActionID:       act.ID,
-			ActionType:     "bgp",
-			TriggerPhase:   triggerPhase,
-			ResponseName:   responseName,
-			ConnectorName:  conn.Name,
-			ConnectorID:    &connID,
-			Status:         "failed",
-			ErrorMessage:   fmt.Sprintf("vtysh: %v", vErr),
-			RequestBody:    cmd,
-			ResponseBody:   out,
-			ExternalRuleID: externalRuleID,
-			DurationMs:     durationMs,
-			ExecutedAt:     t0,
-		}, vErr
+			AttackID: attackDBID, ActionID: act.ID, ActionType: "bgp",
+			TriggerPhase: triggerPhase, ResponseName: responseName,
+			ConnectorName: conn.Name, ConnectorID: &connID,
+			Status: "failed", ErrorMessage: fmt.Sprintf("speaker: %v", aErr),
+			RequestBody:    flowspec.Describe(rule),
+			ExternalRuleID: externalRuleID, DurationMs: durationMs, ExecutedAt: t0,
+		}, aErr
 	}
 
-	metrics.RecordVtysh("announce", "success")
 	detail := fmt.Sprintf("flowspec rule %s announced (announcement_id=%d)", rule.Name, attachResult.AnnouncementID)
 	if mErr := s.BGPAnnouncements().MarkAnnounced(ctx, attachResult.AnnouncementID, attachResult.Gen); mErr != nil {
 		log.Printf("action: flowspec MarkAnnounced announcement_id=%d: %v", attachResult.AnnouncementID, mErr)
 		detail += "; state write failed"
 	}
-	log.Printf("action: flowspec announce %s rule=%s vendor=%s connector=%s announcement_id=%d",
-		rule.Prefix, rule.Name, vendor, conn.Name, attachResult.AnnouncementID)
+	log.Printf("action: flowspec announce %s rule=%s connector=%s announcement_id=%d",
+		rule.Prefix, rule.Name, conn.Name, attachResult.AnnouncementID)
 	return &store.ActionExecutionLog{
-		AttackID:       attackDBID,
-		ActionID:       act.ID,
-		ActionType:     "bgp",
-		TriggerPhase:   triggerPhase,
-		ResponseName:   responseName,
-		ConnectorName:  conn.Name,
-		ConnectorID:    &connID,
-		Status:         "success",
-		Detail:         detail,
-		RequestBody:    cmd,
-		ResponseBody:   out,
-		ExternalRuleID: externalRuleID,
-		DurationMs:     durationMs,
-		ExecutedAt:     t0,
+		AttackID: attackDBID, ActionID: act.ID, ActionType: "bgp",
+		TriggerPhase: triggerPhase, ResponseName: responseName,
+		ConnectorName: conn.Name, ConnectorID: &connID,
+		Status: "success", Detail: detail,
+		RequestBody:    flowspec.Describe(rule),
+		ExternalRuleID: externalRuleID, DurationMs: durationMs, ExecutedAt: t0,
 	}, nil
 }
 
@@ -382,108 +288,52 @@ func flowspecWithdraw(ctx context.Context, s store.Store, conn *store.BGPConnect
 		}, nil
 	}
 
-	vendor, vErr := connectorVendor(conn)
-	if vErr != nil {
-		return &store.ActionExecutionLog{
-			AttackID:       attackDBID,
-			ActionID:       act.ID,
-			ActionType:     "bgp",
-			TriggerPhase:   triggerPhase,
-			ResponseName:   responseName,
-			ConnectorName:  conn.Name,
-			ConnectorID:    &connID,
-			Status:         "failed",
-			ErrorMessage:   vErr.Error(),
-			ExternalRuleID: externalRuleID,
-			ExecutedAt:     time.Now(),
-		}, vErr
-	}
-	lines, rErr := flowspec.RenderWithdraw(vendor, rule)
-	if rErr != nil {
-		return &store.ActionExecutionLog{
-			AttackID:       attackDBID,
-			ActionID:       act.ID,
-			ActionType:     "bgp",
-			TriggerPhase:   triggerPhase,
-			ResponseName:   responseName,
-			ConnectorName:  conn.Name,
-			ConnectorID:    &connID,
-			Status:         "failed",
-			ErrorMessage:   fmt.Sprintf("render withdraw: %v", rErr),
-			ExternalRuleID: externalRuleID,
-			ExecutedAt:     time.Now(),
-		}, rErr
-	}
-	cmd := strings.Join(lines, "\n")
-
-	if vendor != flowspec.VendorFRR {
-		if mErr := s.BGPAnnouncements().MarkWithdrawn(ctx, result.AnnouncementID, result.Gen); mErr != nil {
-			log.Printf("action: flowspec MarkWithdrawn announcement_id=%d: %v", result.AnnouncementID, mErr)
-		}
-		return &store.ActionExecutionLog{
-			AttackID:       attackDBID,
-			ActionID:       act.ID,
-			ActionType:     "bgp",
-			TriggerPhase:   triggerPhase,
-			ResponseName:   responseName,
-			ConnectorName:  conn.Name,
-			ConnectorID:    &connID,
-			Status:         "success",
-			Detail:         fmt.Sprintf("vendor %s is export-only: withdraw command generated for manual application", vendor),
-			RequestBody:    cmd,
-			ExternalRuleID: externalRuleID,
-			ExecutedAt:     time.Now(),
-		}, nil
+	// The announced rule may carry match components (protocol, ports) that the
+	// withdraw path cannot derive from the prefix alone. Rebuild the rule from
+	// the announcement row so the speaker withdraws the same path it announced.
+	if ann, gErr := s.BGPAnnouncements().Get(ctx, result.AnnouncementID); gErr != nil {
+		log.Printf("action: flowspec withdraw announcement lookup id=%d: %v", result.AnnouncementID, gErr)
+	} else if ann != nil {
+		rebuilt := flowspecRuleFromSpec(*ann)
+		rule.Protocol = rebuilt.Protocol
+		rule.DstPort = rebuilt.DstPort
+		rule.SrcPort = rebuilt.SrcPort
+		rule.Action = rebuilt.Action
+		rule.RateLimit = rebuilt.RateLimit
 	}
 
-	if err := vtyshTokens(rule.Prefix, rule.Name); err != nil {
+	sp := bgp.Shared()
+	if sp == nil {
+		msg := "bgp speaker not configured: set up Settings → BGP Instance first"
 		return &store.ActionExecutionLog{
-			AttackID:       attackDBID,
-			ActionID:       act.ID,
-			ActionType:     "bgp",
-			TriggerPhase:   triggerPhase,
-			ResponseName:   responseName,
-			ConnectorName:  conn.Name,
-			ConnectorID:    &connID,
-			Status:         "failed",
-			ErrorMessage:   err.Error(),
-			ExternalRuleID: externalRuleID,
-			ExecutedAt:     time.Now(),
-		}, err
+			AttackID: attackDBID, ActionID: act.ID, ActionType: "bgp",
+			TriggerPhase: triggerPhase, ResponseName: responseName,
+			ConnectorName: conn.Name, ConnectorID: &connID,
+			Status: "failed", ErrorMessage: msg,
+			ExternalRuleID: externalRuleID, ExecutedAt: time.Now(),
+		}, errors.New(msg)
 	}
 
 	t0 := time.Now()
-	out, vErr := runVtysh(ctx, conn.VtyshPath, cmd)
+	wErr := sp.WithdrawFlowspec(ctx, rule)
 	durationMs := int(time.Since(t0).Milliseconds())
-	if vErr != nil {
-		metrics.RecordVtysh("withdraw", "failed")
+	if wErr != nil {
 		if mErr := retryBGPStateWrite(func(writeCtx context.Context) error {
-			return s.BGPAnnouncements().MarkFailedWithdraw(writeCtx, result.AnnouncementID, result.Gen, vErr.Error())
+			return s.BGPAnnouncements().MarkFailedWithdraw(writeCtx, result.AnnouncementID, result.Gen, wErr.Error())
 		}); mErr != nil {
 			metrics.StateWriteFailures.WithLabelValues("bgp_ann_state").Inc()
-			log.Printf("ERROR action: flowspec compensate withdraw failure announcement_id=%d: %v", result.AnnouncementID, mErr)
 		}
-		log.Printf("action: flowspec withdraw failed announcement_id=%d: %v output=%s",
-			result.AnnouncementID, vErr, out)
+		log.Printf("action: flowspec withdraw failed announcement_id=%d: %v", result.AnnouncementID, wErr)
 		return &store.ActionExecutionLog{
-			AttackID:       attackDBID,
-			ActionID:       act.ID,
-			ActionType:     "bgp",
-			TriggerPhase:   triggerPhase,
-			ResponseName:   responseName,
-			ConnectorName:  conn.Name,
-			ConnectorID:    &connID,
-			Status:         "failed",
-			ErrorMessage:   fmt.Sprintf("vtysh: %v", vErr),
-			RequestBody:    cmd,
-			ResponseBody:   out,
-			ExternalRuleID: externalRuleID,
-			DurationMs:     durationMs,
-			ExecutedAt:     t0,
-		}, vErr
+			AttackID: attackDBID, ActionID: act.ID, ActionType: "bgp",
+			TriggerPhase: triggerPhase, ResponseName: responseName,
+			ConnectorName: conn.Name, ConnectorID: &connID,
+			Status: "failed", ErrorMessage: fmt.Sprintf("speaker: %v", wErr),
+			RequestBody:    flowspec.Describe(rule),
+			ExternalRuleID: externalRuleID, DurationMs: durationMs, ExecutedAt: t0,
+		}, wErr
 	}
 
-	metrics.RecordVtysh("withdraw", "success")
 	detail := fmt.Sprintf("flowspec rule %s withdrawn (announcement_id=%d)", rule.Name, result.AnnouncementID)
 	if mErr := s.BGPAnnouncements().MarkWithdrawn(ctx, result.AnnouncementID, result.Gen); mErr != nil {
 		log.Printf("action: flowspec MarkWithdrawn announcement_id=%d: %v", result.AnnouncementID, mErr)
@@ -492,19 +342,11 @@ func flowspecWithdraw(ctx context.Context, s store.Store, conn *store.BGPConnect
 	log.Printf("action: flowspec withdraw %s rule=%s connector=%s announcement_id=%d",
 		rule.Prefix, rule.Name, conn.Name, result.AnnouncementID)
 	return &store.ActionExecutionLog{
-		AttackID:       attackDBID,
-		ActionID:       act.ID,
-		ActionType:     "bgp",
-		TriggerPhase:   triggerPhase,
-		ResponseName:   responseName,
-		ConnectorName:  conn.Name,
-		ConnectorID:    &connID,
-		Status:         "success",
-		Detail:         detail,
-		RequestBody:    cmd,
-		ResponseBody:   out,
-		ExternalRuleID: externalRuleID,
-		DurationMs:     durationMs,
-		ExecutedAt:     t0,
+		AttackID: attackDBID, ActionID: act.ID, ActionType: "bgp",
+		TriggerPhase: triggerPhase, ResponseName: responseName,
+		ConnectorName: conn.Name, ConnectorID: &connID,
+		Status: "success", Detail: detail,
+		RequestBody:    flowspec.Describe(rule),
+		ExternalRuleID: externalRuleID, DurationMs: durationMs, ExecutedAt: t0,
 	}, nil
 }

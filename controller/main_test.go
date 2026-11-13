@@ -95,9 +95,8 @@ func TestDao4_B13_RecoveryCompletesBeforeReconciliation(t *testing.T) {
 		func(context.Context) { marks = append(marks, "PrepareStartupCleanup enter") },
 		func(context.Context) { marks = append(marks, "ReconcileOnStartup enter") },
 		func(context.Context) { marks = append(marks, "CleanupEndedAttachments enter") },
-		func(context.Context) error { marks = append(marks, "RecoverFromDB enter"); return nil },
-		func(context.Context) { marks = append(marks, "BootstrapBGPOrphans enter") })
-	want := []string{"RecoverBGPRoutes enter", "RecoverBGPRoutes exit", "PrepareStartupCleanup enter", "ReconcileOnStartup enter", "CleanupEndedAttachments enter", "RecoverFromDB enter", "BootstrapBGPOrphans enter"}
+		func(context.Context) error { marks = append(marks, "RecoverFromDB enter"); return nil })
+	want := []string{"RecoverBGPRoutes enter", "RecoverBGPRoutes exit", "PrepareStartupCleanup enter", "ReconcileOnStartup enter", "CleanupEndedAttachments enter", "RecoverFromDB enter"}
 	if !reflect.DeepEqual(marks, want) {
 		t.Fatalf("startup marks=%v; want %v", marks, want)
 	}

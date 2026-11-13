@@ -1,9 +1,6 @@
 package main
 
 import (
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -14,47 +11,6 @@ import (
 )
 
 func TestConsoleLegacyLabels(t *testing.T) {
-	file, err := parser.ParseFile(token.NewFileSet(), "internal/action/engine.go", nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var formats []string
-	for _, decl := range file.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "legacyNoRowMessage" {
-			continue
-		}
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			pkg, ok := sel.X.(*ast.Ident)
-			if !ok || pkg.Name != "fmt" || sel.Sel.Name != "Sprintf" {
-				return true
-			}
-			if len(call.Args) == 0 {
-				t.Fatal("Sprintf has no format")
-			}
-			literal, ok := call.Args[0].(*ast.BasicLit)
-			if !ok || literal.Kind != token.STRING {
-				t.Fatal("format must be a string literal")
-			}
-			value, err := strconv.Unquote(literal.Value)
-			if err != nil {
-				t.Fatal(err)
-			}
-			formats = append(formats, value)
-			return true
-		})
-	}
-	if len(formats) != 1 {
-		t.Fatalf("legacyNoRowMessage Sprintf count=%d; want 1", len(formats))
-	}
 	raw, err := os.ReadFile("console/src/i18n/en.ts")
 	if err != nil {
 		t.Fatal(err)
@@ -116,9 +72,6 @@ func TestConsoleLegacyLabels(t *testing.T) {
 		}
 	}
 	for _, label := range []string{"Active Mitigations", "BGP Routing", "Force Withdraw", "Dismissed on upgrade", "Un-dismiss", "orphan", "dismissed orphans"} {
-		if !strings.Contains(formats[0], label) {
-			t.Errorf("backend format lacks %q", label)
-		}
 		found := false
 		for _, literal := range literals {
 			if literal == label || (label == "orphan" || label == "dismissed orphans") && strings.Contains(literal, label) {
@@ -149,5 +102,5 @@ func TestConsoleLegacyLabels(t *testing.T) {
 			t.Errorf("en.ts lacks quoted UI label %q", label)
 		}
 	}
-	t.Logf("legacyNoRowMessage: 1 format, 7 UI labels verified")
+	t.Logf("7 legacy UI labels verified")
 }

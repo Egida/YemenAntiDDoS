@@ -8,12 +8,11 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/d80y6/YemenDDoS/controller/internal/bgp"
 	"github.com/d80y6/YemenDDoS/controller/internal/store"
 	"github.com/d80y6/YemenDDoS/controller/internal/tracker"
 )
@@ -61,13 +60,47 @@ type dao3BGPRepo struct {
 	mu       sync.Mutex
 	rows     []store.BGPAnnouncement
 	failures []string
+	nextID   int
 }
 
-func (r *dao3BGPRepo) Attach(context.Context, store.BGPAttachParams) (store.BGPAttachResult, error) {
-	return store.BGPAttachResult{AnnouncementID: 1, NeedAnnounce: true}, nil
+func (r *dao3BGPRepo) Attach(_ context.Context, p store.BGPAttachParams) (store.BGPAttachResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.nextID++
+	id := r.nextID
+	kind := p.Kind
+	if kind == "" {
+		kind = "rtbh"
+	}
+	r.rows = append(r.rows, store.BGPAnnouncement{
+		ID: id, Prefix: p.Prefix, RouteMap: p.RouteMap, ConnectorID: p.ConnectorID,
+		Status: "announcing", Refcount: 1, Kind: kind, RuleSpec: p.RuleSpec,
+	})
+	return store.BGPAttachResult{AnnouncementID: id, NeedAnnounce: true}, nil
 }
-func (r *dao3BGPRepo) Detach(context.Context, int, string, string, int) (store.BGPDetachResult, error) {
-	return store.BGPDetachResult{AnnouncementID: 1, NeedWithdraw: true}, nil
+func (r *dao3BGPRepo) Detach(_ context.Context, _ int, prefix, routeMap string, connectorID int) (store.BGPDetachResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.rows {
+		row := &r.rows[i]
+		if row.Prefix == prefix && row.RouteMap == routeMap && row.ConnectorID == connectorID {
+			row.Refcount--
+			row.Status = "withdrawing"
+			return store.BGPDetachResult{AnnouncementID: row.ID, NeedWithdraw: true, RefcountAfter: row.Refcount}, nil
+		}
+	}
+	return store.BGPDetachResult{}, nil
+}
+func (r *dao3BGPRepo) Get(_ context.Context, id int) (*store.BGPAnnouncement, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.rows {
+		if r.rows[i].ID == id {
+			row := r.rows[i]
+			return &row, nil
+		}
+	}
+	return nil, nil
 }
 func (r *dao3BGPRepo) MarkAnnounced(context.Context, int, int) error                { return nil }
 func (r *dao3BGPRepo) MarkWithdrawn(context.Context, int, int) error                { return nil }
@@ -99,102 +132,13 @@ func (r *dao3BGPRepo) failureText() string {
 }
 func dao3BGPFixture(t *testing.T) (*dao3BGPStore, store.ResponseAction, string) {
 	t.Helper()
-	dir := t.TempDir()
-	marker := filepath.Join(dir, "calls")
-	script := filepath.Join(dir, "vtysh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf 'called\\n' >> '"+marker+"'\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
 	cid := 7
 	act := store.ResponseAction{ID: 10, ActionType: "bgp", BGPConnectorID: &cid, BGPRouteMap: "RTBH", TriggerPhase: "on_detected"}
-	s := &dao3BGPStore{v3Store: newV3Store("http://unused.invalid"), conn: store.BGPConnector{ID: 7, Enabled: true, BGPASN: 64512, VtyshPath: script}, ann: &dao3BGPRepo{}}
+	s := &dao3BGPStore{v3Store: newV3Store("http://unused.invalid"), conn: store.BGPConnector{ID: 7, Enabled: true, BGPASN: 64512}, ann: &dao3BGPRepo{}}
 	s.actions = []store.ResponseAction{act}
-	return s, act, marker
-}
-func dao3Marker(t *testing.T, path string, want int) {
-	t.Helper()
-	b, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		t.Fatal(err)
-	}
-	if got := strings.Count(string(b), "called\n"); got != want {
-		t.Errorf("vtysh invocations=%d want=%d", got, want)
-	}
-}
-func TestDao3_T1e_ExecutionGuards(t *testing.T) {
-	for _, path := range []string{"announce", "withdraw", "orphan", "recover_active", "recover_delayed", "retry", "force_remove"} {
-		for _, field := range []string{"route_map", "prefix"} {
-			t.Run(path+"/"+field, func(t *testing.T) {
-				s, act, marker := dao3BGPFixture(t)
-				logs := dao3Capture(t)
-				prefix, routeMap := "192.0.2.1/32", "RTBH"
-				bad := "BAD\nINJECT"
-				if field == "prefix" {
-					prefix = bad
-				} else {
-					routeMap = bad
-				}
-				act.BGPRouteMap = routeMap
-				ann := store.BGPAnnouncement{ID: 1, ConnectorID: 7, Prefix: prefix, RouteMap: routeMap, Status: "active"}
-				ctx := context.Background()
-				var entry *store.ActionExecutionLog
-				var err error
-				wantCalls := 0
-				switch path {
-				case "announce":
-					entry, err = bgpAnnounce(ctx, s, nil, &s.conn, act, prefix, 20, "test", "on_detected")
-				case "withdraw":
-					entry, err = bgpWithdraw(ctx, s, nil, &s.conn, act, prefix, 20, "test", "on_expired")
-				case "orphan":
-					entry, err = PerformBGPWithdrawForOrphan(ctx, s, &s.conn, act, prefix, routeMap, 1, 0)
-				case "recover_active", "recover_delayed":
-					ann.Status = strings.TrimPrefix(path, "recover_")
-					s.ann.rows = []store.BGPAnnouncement{ann, {ID: 2, ConnectorID: 7, Prefix: "192.0.2.2/32", RouteMap: "RTBH", Status: ann.Status}}
-					RecoverBGPRoutes(ctx, s)
-					wantCalls = 1
-				case "retry":
-					NewEngine(s, "auto").retryBGPAnnounce(ann)
-				case "force_remove":
-					err = NewEngine(s, "auto").ForceRemove(ctx, 20, 10, 7, prefix+"|"+routeMap)
-				}
-				dao3Marker(t, marker, wantCalls)
-				failure := s.ann.failureText() + logs.String()
-				if err != nil {
-					failure += err.Error()
-				}
-				if entry != nil {
-					if entry.Status != "failed" {
-						t.Errorf("status=%s want failed", entry.Status)
-					}
-					failure += entry.ErrorMessage
-				}
-				if !strings.Contains(failure, "unsafe vtysh token") || strings.Contains(failure, bad) {
-					t.Errorf("missing safe failure or raw token exposed: %q", failure)
-				}
-				if (path == "announce" || path == "withdraw" || path == "orphan" || path == "force_remove") && err == nil {
-					t.Error("expected error")
-				}
-			})
-		}
-	}
-	t.Run("tab", func(t *testing.T) {
-		s, a, marker := dao3BGPFixture(t)
-		a.BGPRouteMap = "RT\tBH"
-		entry, err := bgpAnnounce(context.Background(), s, nil, &s.conn, a, "192.0.2.1/32", 20, "test", "on_detected")
-		dao3Marker(t, marker, 0)
-		if err == nil || entry == nil || entry.Status != "failed" || !strings.Contains(entry.ErrorMessage, "unsafe vtysh token") || strings.Contains(entry.ErrorMessage, a.BGPRouteMap) {
-			t.Fatalf("entry=%+v err=%v", entry, err)
-		}
-	})
-}
-func TestDao3_T1f_VisibleFRRNameAllowed(t *testing.T) {
-	s, a, marker := dao3BGPFixture(t)
-	a.BGPRouteMap = "RTBH:v4"
-	entry, err := bgpAnnounce(context.Background(), s, nil, &s.conn, a, "192.0.2.1/32", 20, "test", "on_detected")
-	if err != nil || entry == nil || entry.Status != "success" {
-		t.Fatalf("entry=%+v err=%v", entry, err)
-	}
-	dao3Marker(t, marker, 1)
+	bgp.SetShared(&bgp.FakeSpeaker{})
+	t.Cleanup(func() { bgp.SetShared(nil) })
+	return s, act, ""
 }
 
 type dao3WebhookStore struct {

@@ -2,64 +2,19 @@ package action
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net"
-	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/d80y6/YemenDDoS/controller/internal/action/flowspec"
+	"github.com/d80y6/YemenDDoS/controller/internal/bgp"
 	"github.com/d80y6/YemenDDoS/controller/internal/metrics"
 	"github.com/d80y6/YemenDDoS/controller/internal/store"
 )
-
-// addressFamilyForPrefix returns the FRR address-family string based on the prefix's IP version.
-// Uses net.ParseCIDR / net.ParseIP for robust detection — not string heuristics.
-func addressFamilyForPrefix(prefix string) string {
-	if isIPv6(prefix) {
-		return "ipv6 unicast"
-	}
-	return "ipv4 unicast"
-}
-
-// isFRRRouteAbsentError returns true if vtysh stderr indicates "there's
-// nothing here to remove" — a withdraw against a route that's already gone.
-// xSight treats this as idempotent success.
-//
-// We intentionally match ONLY specific, verified phrases observed in the wild
-// for this exact case. Broader patterns like "No such" or "does not exist"
-// would also catch legitimate FRR config errors (e.g., `No such route-map
-// entry` from a typo in route-map name, or `address-family ... does not
-// exist`) and mask them as success — leaving announcements falsely marked
-// withdrawn while FRR still holds the route. Per PR-7 audit P1.
-//
-// Known idempotent phrases:
-//   - "Can't find static route"
-//     Classic: `no network X route-map Y` when that exact network never
-//     existed.
-//   - "route-map name doesn't match static route"
-//     Surfaces when `network X route-map Y` was rejected during origination
-//     (e.g., two different route-maps for the same prefix — BGP keeps only
-//     one) and xSight later tries to withdraw the rejected one. See L14.
-//
-// If other genuinely-idempotent FRR phrasings are observed, add them here
-// with a concrete case; do not re-broaden to generic "not found" wording.
-func isFRRRouteAbsentError(output string) bool {
-	if output == "" {
-		return false
-	}
-	for _, pat := range []string{
-		"Can't find static route",
-		"route-map name doesn't match static route",
-	} {
-		if strings.Contains(output, pat) {
-			return true
-		}
-	}
-	return false
-}
 
 // isIPv6 determines whether a prefix or IP string is IPv6.
 // Handles both CIDR ("2001:db8::/32") and plain IP ("2001:db8::1") forms.
@@ -88,9 +43,9 @@ func splitExternalRuleID(ruleID string) []string {
 	return []string{ruleID}
 }
 
-// executeBGP runs a vtysh command to inject or withdraw a BGP route.
-// on_detected: Attach to announcement; run vtysh network if refcount→1
-// on_expired:  Detach from announcement; run vtysh no network if refcount→0 and delay=0
+// executeBGP injects or withdraws a BGP route through the embedded speaker.
+// on_detected: Attach to announcement; announce if refcount→1
+// on_expired:  Detach from announcement; withdraw if refcount→0 and delay=0
 //
 // The `engine` parameter is required for the delayed-withdraw path (PR-5
 // arms timers via engine.ScheduleDelay with announcement_id). Can be nil
@@ -143,10 +98,8 @@ func executeBGP(ctx context.Context, s store.Store, engine *Engine, act store.Re
 		return executeBGPFlowspec(ctx, s, conn, act, attack, dstIP, attackDBID, responseName, triggerPhase)
 	}
 
-	// RTBH below injects routes into a local FRR through vtysh. Any other
-	// vendor is export-only (see executeBGPFlowspec), so refuse instead of
-	// pushing FRR syntax at a Cisco/Juniper/Arista box.
-	if vendor, vErr := flowspec.ParseVendor(conn.Vendor); vErr != nil || vendor != flowspec.VendorFRR {
+	sp := bgp.Shared()
+	if sp == nil {
 		return recordSkip(&store.ActionExecutionLog{
 			AttackID:      attackDBID,
 			ActionID:      act.ID,
@@ -154,10 +107,11 @@ func executeBGP(ctx context.Context, s store.Store, engine *Engine, act store.Re
 			TriggerPhase:  triggerPhase,
 			ResponseName:  responseName,
 			ConnectorName: conn.Name,
+			ConnectorID:   act.BGPConnectorID,
 			Status:        "skipped",
-			ErrorMessage:  fmt.Sprintf("vendor %q is export-only for RTBH; enable flowspec_enabled on this connector", conn.Vendor),
+			ErrorMessage:  "bgp speaker not configured: set up Settings → BGP Instance first",
 			ExecutedAt:    time.Now(),
-		}, SkipReasonVendorExportOnly), nil
+		}, SkipReasonSpeakerNotConfigured), nil
 	}
 
 	switch triggerPhase {
@@ -180,13 +134,12 @@ func executeBGP(ctx context.Context, s store.Store, engine *Engine, act store.Re
 }
 
 // bgpAnnounce attaches this attack to an announcement (creating one if
-// necessary) and invokes vtysh network only when the refcount-based manager
+// necessary) and announces the route only when the refcount-based manager
 // tells us this is a new announcement.
 //
-// v1.2 PR-5: replaces per-attack vtysh announce. Multiple attacks sharing
-// the same (prefix, route_map, connector) will all attach to a single
-// announcement — only the first attack triggers vtysh, subsequent attaches
-// just bump the refcount.
+// v1.2 PR-5: multiple attacks sharing the same (prefix, route_map, connector)
+// attach to a single announcement. Only the first attack triggers the speaker,
+// while subsequent attaches just bump the refcount.
 //
 // `engine` is used to cancel any in-memory delay timer if this attach
 // resurrected a delayed announcement. Can be nil in tests / recovery paths
@@ -242,7 +195,7 @@ func bgpAnnounce(ctx context.Context, s store.Store, engine *Engine, conn *store
 	if !attachResult.NeedAnnounce {
 		// Shared attach (refcount++ on existing active announcement) OR
 		// delay-cancelling attach (refcount 0→1 resurrecting a delayed
-		// announcement). In either case, no vtysh needed. If the announcement
+		// announcement). In either case, no speaker call is needed. If the announcement
 		// was in delayed state, the Attach already transitioned status back
 		// to active in DB — but we ALSO need to cancel the in-memory timer
 		// goroutine so it doesn't fire withdrawal. Idempotent: if no timer is
@@ -268,45 +221,43 @@ func bgpAnnounce(ctx context.Context, s store.Store, engine *Engine, conn *store
 		}, nil
 	}
 
-	// First attach — execute vtysh network.
-	af := addressFamilyForPrefix(dstIP)
-	var cmd, out string
-	t0 := time.Now()
-	vErr := vtyshTokens(dstIP, routeMap)
-	if vErr == nil {
-		cmd = fmt.Sprintf("configure terminal\nrouter bgp %d\naddress-family %s\nnetwork %s route-map %s",
-			conn.BGPASN, af, dstIP, routeMap)
-		out, vErr = runVtysh(ctx, conn.VtyshPath, cmd)
+	sp := bgp.Shared()
+	if sp == nil {
+		msg := "bgp speaker not configured: set up Settings → BGP Instance first"
+		markFlowspecAnnounceFailed(ctx, s, attachResult, errors.New(msg))
+		return &store.ActionExecutionLog{
+			AttackID:       attackDBID,
+			ActionID:       act.ID,
+			ActionType:     "bgp",
+			TriggerPhase:   triggerPhase,
+			ResponseName:   responseName,
+			ConnectorName:  conn.Name,
+			ConnectorID:    &connID,
+			Status:         "failed",
+			ErrorMessage:   msg,
+			ExternalRuleID: externalRuleID,
+			ExecutedAt:     time.Now(),
+		}, errors.New(msg)
 	}
+
+	// First attach — originate the blackhole route.
+	t0 := time.Now()
+	aErr := sp.AnnounceBlackhole(ctx, dstIP)
 	durationMs := int(time.Since(t0).Milliseconds())
 
-	if vErr != nil {
-		metrics.RecordVtysh("announce", "failed")
-		log.Printf("action: bgp announce failed announcement_id=%d: %v output=%s",
-			attachResult.AnnouncementID, vErr, out)
+	if aErr != nil {
+		log.Printf("action: bgp announce failed announcement_id=%d: %v", attachResult.AnnouncementID, aErr)
 		detail := ""
-		errorMessage := fmt.Sprintf("vtysh: %v", vErr)
-		var exitErr *exec.ExitError
-		if cmd != "" && ctx.Err() != nil {
-			log.Printf("WARN bgp announce outcome unknown (ctx ended) announcement_id=%d prefix=%s route_map=%s; leaving announcing for reconcile",
-				attachResult.AnnouncementID, dstIP, routeMap)
-			errorMessage += "; outcome unknown (ctx ended)"
-		} else if cmd != "" && errors.As(vErr, &exitErr) && !exitErr.Exited() {
-			log.Printf("WARN bgp announce outcome unknown (killed by signal) announcement_id=%d prefix=%s route_map=%s; leaving announcing for reconcile",
-				attachResult.AnnouncementID, dstIP, routeMap)
-			errorMessage += "; outcome unknown (killed by signal)"
-		} else {
-			// Definite failures compensate within the original generation.
-			cErr := retryBGPStateWrite(func(writeCtx context.Context) error {
-				return s.BGPAnnouncements().MarkFailedAnnounce(writeCtx, attachResult.AnnouncementID, attachResult.Gen, vErr.Error())
-			})
-			if bgpStateNotApplied(cErr, attachResult.AnnouncementID, attachResult.Gen, "failed_announce") {
-				detail = bgpNotAppliedDetail
-			} else if cErr != nil {
-				metrics.StateWriteFailures.WithLabelValues("bgp_ann_state").Inc()
-				log.Printf("ERROR action: bgp compensate announce failure announcement_id=%d: %v",
-					attachResult.AnnouncementID, cErr)
-			}
+		errorMessage := fmt.Sprintf("speaker: %v", aErr)
+		cErr := retryBGPStateWrite(func(writeCtx context.Context) error {
+			return s.BGPAnnouncements().MarkFailedAnnounce(writeCtx, attachResult.AnnouncementID, attachResult.Gen, aErr.Error())
+		})
+		if bgpStateNotApplied(cErr, attachResult.AnnouncementID, attachResult.Gen, "failed_announce") {
+			detail = bgpNotAppliedDetail
+		} else if cErr != nil {
+			metrics.StateWriteFailures.WithLabelValues("bgp_ann_state").Inc()
+			log.Printf("ERROR action: bgp compensate announce failure announcement_id=%d: %v",
+				attachResult.AnnouncementID, cErr)
 		}
 		return &store.ActionExecutionLog{
 			AttackID:       attackDBID,
@@ -319,23 +270,21 @@ func bgpAnnounce(ctx context.Context, s store.Store, engine *Engine, conn *store
 			Status:         "failed",
 			ErrorMessage:   errorMessage,
 			Detail:         detail,
-			RequestBody:    cmd,
-			ResponseBody:   out,
+			RequestBody:    "blackhole " + dstIP,
 			ExternalRuleID: externalRuleID,
 			DurationMs:     durationMs,
 			ExecutedAt:     t0,
-		}, vErr
+		}, aErr
 	}
 
-	metrics.RecordVtysh("announce", "success")
 	detail := fmt.Sprintf("triggered announcement_id=%d", attachResult.AnnouncementID)
 	if mErr := s.BGPAnnouncements().MarkAnnounced(ctx, attachResult.AnnouncementID, attachResult.Gen); bgpStateNotApplied(mErr, attachResult.AnnouncementID, attachResult.Gen, "announced") {
 		detail += "; " + bgpNotAppliedDetail
 	} else if mErr != nil {
 		log.Printf("action: bgp MarkAnnounced announcement_id=%d: %v", attachResult.AnnouncementID, mErr)
 	}
-	log.Printf("action: bgp announce %s route-map=%s connector=%s announcement_id=%d",
-		dstIP, routeMap, conn.Name, attachResult.AnnouncementID)
+	log.Printf("action: bgp announce %s connector=%s announcement_id=%d",
+		dstIP, conn.Name, attachResult.AnnouncementID)
 	return &store.ActionExecutionLog{
 		AttackID:       attackDBID,
 		ActionID:       act.ID,
@@ -346,8 +295,7 @@ func bgpAnnounce(ctx context.Context, s store.Store, engine *Engine, conn *store
 		ConnectorID:    &connID,
 		Status:         "success",
 		Detail:         detail,
-		RequestBody:    cmd,
-		ResponseBody:   out,
+		RequestBody:    "blackhole " + dstIP,
 		ExternalRuleID: externalRuleID,
 		DurationMs:     durationMs,
 		ExecutedAt:     t0,
@@ -355,12 +303,11 @@ func bgpAnnounce(ctx context.Context, s store.Store, engine *Engine, conn *store
 }
 
 // bgpWithdraw detaches this attack from the announcement. Depending on
-// refcount/delay the manager tells us whether to run vtysh immediately,
+// refcount/delay the manager tells us whether to withdraw immediately,
 // arm a delay timer, or do nothing (shared detach).
 //
-// v1.2 PR-5: replaces per-attack vtysh withdraw. When multiple attacks
-// share an announcement, only the LAST detach triggers vtysh. Eliminates
-// the withdraw race that plagued v1.1.x.
+// v1.2 PR-5: when multiple attacks share an announcement, only the LAST
+// detach triggers the speaker withdrawal.
 //
 // `engine` must be non-nil when the delayed-withdraw path can trigger (i.e.
 // when any attached attack carries a non-zero bgp_withdraw_delay). Recovery
@@ -529,7 +476,7 @@ func bgpWithdraw(ctx context.Context, s store.Store, engine *Engine, conn *store
 	}
 
 	// Immediate withdraw: refcount=0, delay=0. Detach already transitioned
-	// the announcement to 'withdrawing'. Run vtysh now and finalize.
+	// the announcement to 'withdrawing'. Withdraw now and finalize.
 	return performBGPWithdraw(ctx, s, conn, act, dstIP, routeMap, attackDBID, result.AnnouncementID, result.Gen, responseName, triggerPhase)
 }
 
@@ -557,7 +504,7 @@ func bgpDelayedWithdrawWorker(s store.Store, engine *Engine, conn *store.BGPConn
 			return
 		}
 
-		// Claim this generation's delayed announcement before vtysh.
+		// Claim this generation's delayed announcement before the speaker withdrawal.
 		// Returns false if concurrent attach cancelled (refcount now > 0).
 		ok, mErr := s.BGPAnnouncements().MarkWithdrawing(execCtx, announcementID, gen)
 		if mErr != nil {
@@ -573,7 +520,7 @@ func bgpDelayedWithdrawWorker(s store.Store, engine *Engine, conn *store.BGPConn
 			return
 		}
 
-		// Run the actual vtysh withdraw and finalize.
+		// Run the actual speaker withdrawal and finalize.
 		execLog, wErr := performBGPWithdraw(execCtx, s, conn, act, dstIP, routeMap, attackDBID, announcementID, gen, responseName, "on_expired")
 		if wErr != nil {
 			engine.FailDelayForAnnouncement(execCtx, schedID, announcementID, wErr.Error())
@@ -629,8 +576,8 @@ func retryBGPStateWrite(write func(context.Context) error) (err error) {
 	return err
 }
 
-// performBGPWithdraw runs the actual vtysh no network command for a
-// withdrawing-state announcement and transitions to withdrawn/failed.
+// performBGPWithdraw runs the speaker withdrawal for a withdrawing-state
+// announcement and transitions to withdrawn/failed.
 // Called from bgpWithdraw's immediate branch and from the delayed goroutine.
 func performBGPWithdraw(ctx context.Context, s store.Store, conn *store.BGPConnector,
 	act store.ResponseAction, dstIP, routeMap string, attackDBID, announcementID int, gen int,
@@ -650,50 +597,19 @@ func performBGPWithdraw(ctx context.Context, s store.Store, conn *store.BGPConne
 	externalRuleID := fmt.Sprintf("%s|%s", dstIP, routeMap)
 	connID := conn.ID
 
-	waf := addressFamilyForPrefix(dstIP)
-	var cmd, out string
 	t0 := time.Now()
-	vErr := vtyshTokens(dstIP, routeMap)
-	if vErr == nil {
-		cmd = fmt.Sprintf("configure terminal\nrouter bgp %d\naddress-family %s\nno network %s route-map %s",
-			conn.BGPASN, waf, dstIP, routeMap)
-		out, vErr = runVtysh(ctx, conn.VtyshPath, cmd)
+	sp := bgp.Shared()
+	var wErr error
+	if sp == nil {
+		wErr = errors.New("bgp speaker not configured")
+	} else {
+		wErr = sp.WithdrawBlackhole(ctx, dstIP)
 	}
 	durationMs := int(time.Since(t0).Milliseconds())
 
-	if vErr != nil {
-		outStr := strings.TrimSpace(out)
-		if isFRRRouteAbsentError(outStr) {
-			// Idempotent success — route already gone.
-			metrics.RecordVtysh("withdraw", "idempotent")
-			log.Printf("action: bgp withdraw %s already gone (idempotent, announcement_id=%d)", externalRuleID, announcementID)
-			if mErr := retryBGPStateWrite(func(writeCtx context.Context) error {
-				return s.BGPAnnouncements().MarkWithdrawn(writeCtx, announcementID, gen)
-			}); mErr != nil {
-				recordStateError(mErr, "withdrawn")
-			}
-			return &store.ActionExecutionLog{
-				AttackID:       attackDBID,
-				ActionID:       act.ID,
-				ActionType:     "bgp",
-				TriggerPhase:   triggerPhase,
-				ResponseName:   responseName,
-				ConnectorName:  conn.Name,
-				ConnectorID:    &connID,
-				Status:         "success",
-				ErrorMessage:   "idempotent: route already withdrawn" + stateError,
-				Detail:         stateDetail,
-				RequestBody:    cmd,
-				ResponseBody:   out,
-				ExternalRuleID: externalRuleID,
-				DurationMs:     durationMs,
-				ExecutedAt:     t0,
-			}, nil
-		}
-		// Real failure.
-		metrics.RecordVtysh("withdraw", "failed")
+	if wErr != nil {
 		if mErr := retryBGPStateWrite(func(writeCtx context.Context) error {
-			return s.BGPAnnouncements().MarkFailedWithdraw(writeCtx, announcementID, gen, vErr.Error())
+			return s.BGPAnnouncements().MarkFailedWithdraw(writeCtx, announcementID, gen, wErr.Error())
 		}); mErr != nil {
 			recordStateError(mErr, "failed_withdraw")
 		}
@@ -706,19 +622,16 @@ func performBGPWithdraw(ctx context.Context, s store.Store, conn *store.BGPConne
 			ConnectorName:  conn.Name,
 			ConnectorID:    &connID,
 			Status:         "failed",
-			ErrorMessage:   fmt.Sprintf("%v (%s)", vErr, outStr) + stateError,
+			ErrorMessage:   fmt.Sprintf("speaker: %v", wErr) + stateError,
 			Detail:         stateDetail,
-			RequestBody:    cmd,
-			ResponseBody:   out,
+			RequestBody:    "blackhole " + dstIP,
 			ExternalRuleID: externalRuleID,
 			DurationMs:     durationMs,
 			ExecutedAt:     t0,
-		}, vErr
+		}, wErr
 	}
 
-	// Success.
-	metrics.RecordVtysh("withdraw", "success")
-	log.Printf("action: bgp withdraw %s route-map=%s connector=%s announcement_id=%d", dstIP, routeMap, conn.Name, announcementID)
+	log.Printf("action: bgp withdraw %s connector=%s announcement_id=%d", dstIP, conn.Name, announcementID)
 	if mErr := retryBGPStateWrite(func(writeCtx context.Context) error {
 		return s.BGPAnnouncements().MarkWithdrawn(writeCtx, announcementID, gen)
 	}); mErr != nil {
@@ -735,74 +648,59 @@ func performBGPWithdraw(ctx context.Context, s store.Store, conn *store.BGPConne
 		Status:         "success",
 		ErrorMessage:   strings.TrimPrefix(stateError, "; "),
 		Detail:         stateDetail,
-		RequestBody:    cmd,
-		ResponseBody:   out,
+		RequestBody:    "blackhole " + dstIP,
 		ExternalRuleID: externalRuleID,
 		DurationMs:     durationMs,
 		ExecutedAt:     t0,
 	}, nil
 }
 
-// RecoverBGPRoutes restores ephemeral FRR configuration from announcement state.
-// It is synchronous and independent of tracker and startup reconciliation.
+// RecoverBGPRoutes re-originates active/delayed announcements in the embedded
+// speaker after a controller restart. Synchronous; runs before startup
+// reconciliation. Flowspec rules rebuild from the stored rule_spec JSON;
+// RTBH from the announcement prefix.
 func RecoverBGPRoutes(ctx context.Context, s store.Store) {
 	announcements, err := s.BGPAnnouncements().ListActive(ctx)
 	if err != nil {
 		log.Printf("bgp recovery: list announcements: %v", err)
 		return
 	}
+	sp := bgp.Shared()
+	if sp == nil {
+		log.Printf("bgp recovery: speaker not configured, skipping %d announcements", len(announcements))
+		return
+	}
 	for _, ann := range announcements {
 		if ann.Status != "active" && ann.Status != "delayed" {
 			continue
 		}
-		conn, err := s.BGPConnectors().Get(ctx, ann.ConnectorID)
-		if err != nil || conn == nil || !conn.Enabled {
-			log.Printf("bgp recovery: connector %d unavailable: %v", ann.ConnectorID, err)
+		if ann.Kind == "flowspec" {
+			rule := flowspecRuleFromSpec(ann)
+			if err := sp.AnnounceFlowspec(ctx, rule); err != nil {
+				log.Printf("bgp recovery: flowspec announcement_id=%d: %v", ann.ID, err)
+			}
 			continue
 		}
-		if err := vtyshTokens(ann.Prefix, ann.RouteMap); err != nil {
-			metrics.RecordVtysh("announce", "failed")
-			log.Printf("bgp recovery: announcement_id=%d: %v", ann.ID, err)
-			continue
-		}
-		cmd := fmt.Sprintf("configure terminal\nrouter bgp %d\naddress-family %s\nnetwork %s route-map %s",
-			conn.BGPASN, addressFamilyForPrefix(ann.Prefix), ann.Prefix, ann.RouteMap)
-		if _, err := runVtysh(ctx, conn.VtyshPath, cmd); err != nil {
-			metrics.RecordVtysh("announce", "failed")
-			log.Printf("bgp recovery: re-inject %s route-map=%s failed: %v", ann.Prefix, ann.RouteMap, err)
-		} else {
-			metrics.RecordVtysh("announce", "success")
+		if err := sp.AnnounceBlackhole(ctx, ann.Prefix); err != nil {
+			log.Printf("bgp recovery: rtbh announcement_id=%d %s: %v", ann.ID, ann.Prefix, err)
 		}
 	}
 }
 
-var vtyshTimeout = 60 * time.Second
-var vtyshWaitDelay = 2 * time.Second
-var errVtyshTimeout = errors.New("vtysh timed out")
-
-// runVtysh executes vtysh with the given commands (newline-separated).
-func runVtysh(ctx context.Context, vtyshPath, commands string) (string, error) {
-	args := []string{}
-	for _, line := range strings.Split(commands, "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			args = append(args, "-c", line)
-		}
+// flowspecRuleFromSpec rebuilds the rule from a flowspec announcement row.
+func flowspecRuleFromSpec(ann store.BGPAnnouncement) flowspec.Rule {
+	var rule flowspec.Rule
+	if strings.TrimSpace(ann.RuleSpec) != "" {
+		_ = json.Unmarshal([]byte(ann.RuleSpec), &rule)
 	}
-	cmdCtx, cancel := context.WithTimeout(ctx, vtyshTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(cmdCtx, vtyshPath, args...)
-	dl, _ := cmdCtx.Deadline()
-	budget := time.Until(dl)
-	cmd.WaitDelay = budget + vtyshWaitDelay
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		return strings.TrimSpace(string(out)), nil
+	if rule.Name == "" {
+		rule.Name = ann.RouteMap
 	}
-	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
-		err = nil
-	} else if cmdCtx.Err() == context.DeadlineExceeded {
-		err = fmt.Errorf("%w after %s: %w", errVtyshTimeout, budget, err)
+	if rule.Prefix == "" {
+		rule.Prefix = ann.Prefix
 	}
-	return strings.TrimSpace(string(out)), err
+	if rule.Action == "" {
+		rule.Action = flowspec.ActionDrop
+	}
+	return rule
 }

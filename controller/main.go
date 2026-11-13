@@ -27,6 +27,7 @@ import (
 
 	"github.com/d80y6/YemenDDoS/controller/internal/action"
 	"github.com/d80y6/YemenDDoS/controller/internal/api"
+	"github.com/d80y6/YemenDDoS/controller/internal/bgp"
 	"github.com/d80y6/YemenDDoS/controller/internal/config"
 	"github.com/d80y6/YemenDDoS/controller/internal/configpub"
 	"github.com/d80y6/YemenDDoS/controller/internal/engine"
@@ -231,6 +232,42 @@ func main() {
 	// behaves identically to `db` at the Store interface level.
 	// Postgres-specific methods (AutoMigrate, Close) still use `db` directly.
 	iStore := metrics.InstrumentStore(db)
+
+	// --- Embedded GoBGP speaker (v5.0) ---
+	if inst, iErr := db.BGPInstances().Get(ctx); iErr != nil {
+		log.Printf("bgp: load instance config: %v", iErr)
+	} else if inst != nil && inst.LocalASN > 0 && inst.RouterID != "" {
+		sp := bgp.NewGobgp(bgp.Config{
+			LocalASN:    uint32(inst.LocalASN),
+			RouterID:    inst.RouterID,
+			ListenPort:  int32(inst.ListenPort),
+			RTBHNextHop: inst.RTBHNextHop,
+		})
+		if sErr := sp.Start(ctx); sErr != nil {
+			log.Fatalf("bgp: start speaker: %v", sErr)
+		}
+		bgp.SetShared(sp)
+		if conns, cErr := iStore.BGPConnectors().List(ctx); cErr == nil {
+			peers := make([]bgp.Peer, 0, len(conns))
+			for _, conn := range conns {
+				if !conn.Enabled || conn.NeighborIP == "" || conn.NeighborASN == 0 {
+					continue
+				}
+				peers = append(peers, bgp.Peer{
+					ConnectorID: conn.ID, Name: conn.Name,
+					NeighborIP: conn.NeighborIP, NeighborASN: uint32(conn.NeighborASN),
+					MD5Password: conn.MD5Password, AddressFamily: conn.AddressFamily,
+				})
+			}
+			if pErr := sp.SyncPeers(ctx, peers); pErr != nil {
+				log.Printf("bgp: initial peer sync: %v", pErr)
+			}
+		}
+		log.Printf("bgp: speaker started asn=%d router-id=%s port=%d", inst.LocalASN, inst.RouterID, inst.ListenPort)
+	} else {
+		log.Printf("bgp: no bgp_instance configured; BGP actions fail closed")
+	}
+
 	action.SetXDropShapeConfig(cfg.Action.XDropNarrowPct, cfg.Action.XDropMinSamplePackets)
 	action.SetXDropAdaptiveSamples(cfg.Action.XDropAdaptiveSamples)
 	action.SetXDropTopKConfig(cfg.Action.XDropTopKPct, cfg.Action.XDropTopKMax)
@@ -260,7 +297,7 @@ func main() {
 		return action.NarrowingInput{TopFlows: criticalFlows.get(attackID)}
 	})
 
-	// Restore FRR synchronously before reconciliation starts side-effect workers.
+	// Restore BGP routes synchronously before reconciliation starts side-effect workers.
 	var pre action.StartupScheduleSnapshot
 	var preErr error
 	recoverOnStartup(ctx,
@@ -268,8 +305,7 @@ func main() {
 		func(ctx context.Context) { pre, preErr = actionEngine.PrepareStartupCleanup(ctx) },
 		actionEngine.ReconcileOnStartup,
 		func(ctx context.Context) { actionEngine.CleanupEndedAttachments(ctx, pre, preErr) },
-		attackTracker.RecoverFromDB,
-		func(ctx context.Context) { action.BootstrapBGPOrphans(ctx, iStore) })
+		attackTracker.RecoverFromDB)
 	go actionEngine.RunXDropReconcile(ctx, 2*time.Minute)
 	go actionEngine.RunWithdrawingReconcile(ctx, withdrawingReconcileInterval)
 	go actionEngine.RunAnnouncingReconcile(ctx, announcingReconcileInterval)
@@ -737,7 +773,7 @@ func knownDecoderList() string {
 }
 
 // recoverOnStartup is shared by main and the startup ordering behavior test.
-func recoverOnStartup(ctx context.Context, routes, prepare, reconcile, cleanup func(context.Context), attacks func(context.Context) error, orphans func(context.Context)) {
+func recoverOnStartup(ctx context.Context, routes, prepare, reconcile, cleanup func(context.Context), attacks func(context.Context) error) {
 	routes(ctx)
 	prepare(ctx)
 	reconcile(ctx)
@@ -745,7 +781,6 @@ func recoverOnStartup(ctx context.Context, routes, prepare, reconcile, cleanup f
 	if err := attacks(ctx); err != nil {
 		log.Printf("tracker recovery: %v", err)
 	}
-	orphans(ctx)
 }
 
 func dynamicBreaches(nodes, prefixes []string, rings *ring.RingStore, pe *baseline.ProfileEngine, window int) []engine.ThresholdExceeded {

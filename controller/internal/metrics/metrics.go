@@ -122,8 +122,8 @@ var ActionExecutions = prometheus.NewCounterVec(
 // xdrop_anomaly_requires_drop (historical), global_no_target, deprecated_xdrop_api,
 // unknown_action_type, no_connector, connector_disabled, unknown_trigger_phase,
 // stale_generation, incomplete_config, connector_lookup_failed, no_rules_to_unblock,
-// outbound_block_forbidden.
-// Cardinality: bounded by the enum (currently 18 values).
+// speaker_not_configured, outbound_block_forbidden.
+// Cardinality: bounded by the enum (currently 19 values).
 var ActionSkip = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Name: "xsight_action_skip_total",
