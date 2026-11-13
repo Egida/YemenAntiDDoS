@@ -58,6 +58,7 @@ func TestDao12h_C2_StaleReturnsTrue(t *testing.T) {
 	base, _, _ := dao3BGPFixture(t)
 	fake := &bgp.FakeSpeaker{}
 	bgp.SetShared(fake)
+	t.Cleanup(func() { bgp.SetShared(nil) })
 	s := dao12hContractStore{base, base.BGPConnectors(), dao12hStaleAnnouncement{base.BGPAnnouncements()}}
 	counter := func(outcome string) float64 {
 		return testutil.ToFloat64(metrics.BGPAnnouncingReconcile.WithLabelValues(outcome))

@@ -157,7 +157,7 @@ func flowspecAnnounce(ctx context.Context, s store.Store, conn *store.BGPConnect
 	sp := bgp.Shared()
 	if sp == nil {
 		msg := "bgp speaker not configured: set up Settings → BGP Instance first"
-		markFlowspecAnnounceFailed(ctx, s, attachResult, errors.New(msg))
+		markAnnounceFailed(ctx, s, attachResult, errors.New(msg))
 		return &store.ActionExecutionLog{
 			AttackID: attackDBID, ActionID: act.ID, ActionType: "bgp",
 			TriggerPhase: triggerPhase, ResponseName: responseName,
@@ -171,7 +171,7 @@ func flowspecAnnounce(ctx context.Context, s store.Store, conn *store.BGPConnect
 	aErr := sp.AnnounceFlowspec(ctx, rule)
 	durationMs := int(time.Since(t0).Milliseconds())
 	if aErr != nil {
-		markFlowspecAnnounceFailed(ctx, s, attachResult, aErr)
+		markAnnounceFailed(ctx, s, attachResult, aErr)
 		log.Printf("action: flowspec announce failed announcement_id=%d: %v",
 			attachResult.AnnouncementID, aErr)
 		return &store.ActionExecutionLog{
@@ -201,13 +201,32 @@ func flowspecAnnounce(ctx context.Context, s store.Store, conn *store.BGPConnect
 	}, nil
 }
 
-func markFlowspecAnnounceFailed(ctx context.Context, s store.Store, res store.BGPAttachResult, cause error) {
-	if err := retryBGPStateWrite(func(writeCtx context.Context) error {
+// markAnnounceFailed compensates a failed announce by marking the announcement
+// failed. A stale-generation result is benign (a newer generation owns the
+// row) and is not counted as a state-write failure.
+func markAnnounceFailed(ctx context.Context, s store.Store, res store.BGPAttachResult, cause error) {
+	err := retryBGPStateWrite(func(writeCtx context.Context) error {
 		return s.BGPAnnouncements().MarkFailedAnnounce(writeCtx, res.AnnouncementID, res.Gen, cause.Error())
-	}); err != nil {
-		metrics.StateWriteFailures.WithLabelValues("bgp_ann_state").Inc()
-		log.Printf("ERROR action: flowspec compensate announce failure announcement_id=%d: %v", res.AnnouncementID, err)
+	})
+	if err == nil || bgpStateNotApplied(err, res.AnnouncementID, res.Gen, "failed_announce") {
+		return
 	}
+	metrics.StateWriteFailures.WithLabelValues("bgp_ann_state").Inc()
+	log.Printf("ERROR action: compensate announce failure announcement_id=%d: %v", res.AnnouncementID, err)
+}
+
+// markWithdrawFailed compensates a failed withdraw by marking the announcement
+// failed. A stale-generation result is benign and is not counted as a
+// state-write failure.
+func markWithdrawFailed(ctx context.Context, s store.Store, announcementID, gen int, cause string) {
+	err := retryBGPStateWrite(func(writeCtx context.Context) error {
+		return s.BGPAnnouncements().MarkFailedWithdraw(writeCtx, announcementID, gen, cause)
+	})
+	if err == nil || bgpStateNotApplied(err, announcementID, gen, "failed_withdraw") {
+		return
+	}
+	metrics.StateWriteFailures.WithLabelValues("bgp_ann_state").Inc()
+	log.Printf("ERROR action: bgp MarkFailedWithdraw announcement_id=%d: %v", announcementID, err)
 }
 
 func flowspecWithdraw(ctx context.Context, s store.Store, conn *store.BGPConnector, act store.ResponseAction,
@@ -291,20 +310,35 @@ func flowspecWithdraw(ctx context.Context, s store.Store, conn *store.BGPConnect
 	// The announced rule may carry match components (protocol, ports) that the
 	// withdraw path cannot derive from the prefix alone. Rebuild the rule from
 	// the announcement row so the speaker withdraws the same path it announced.
-	if ann, gErr := s.BGPAnnouncements().Get(ctx, result.AnnouncementID); gErr != nil {
-		log.Printf("action: flowspec withdraw announcement lookup id=%d: %v", result.AnnouncementID, gErr)
-	} else if ann != nil {
-		rebuilt := flowspecRuleFromSpec(*ann)
-		rule.Protocol = rebuilt.Protocol
-		rule.DstPort = rebuilt.DstPort
-		rule.SrcPort = rebuilt.SrcPort
-		rule.Action = rebuilt.Action
-		rule.RateLimit = rebuilt.RateLimit
+	// A lookup failure fails closed: withdrawing a dstIP-derived rule would
+	// delete nothing (or the wrong path) while MarkWithdrawn hides the row.
+	ann, gErr := s.BGPAnnouncements().Get(ctx, result.AnnouncementID)
+	if gErr == nil && ann == nil {
+		gErr = fmt.Errorf("announcement %d not found", result.AnnouncementID)
 	}
+	if gErr != nil {
+		log.Printf("action: flowspec withdraw announcement lookup id=%d: %v", result.AnnouncementID, gErr)
+		msg := fmt.Sprintf("announcement lookup: %v", gErr)
+		markWithdrawFailed(ctx, s, result.AnnouncementID, result.Gen, msg)
+		return &store.ActionExecutionLog{
+			AttackID: attackDBID, ActionID: act.ID, ActionType: "bgp",
+			TriggerPhase: triggerPhase, ResponseName: responseName,
+			ConnectorName: conn.Name, ConnectorID: &connID,
+			Status: "failed", ErrorMessage: msg,
+			ExternalRuleID: externalRuleID, ExecutedAt: time.Now(),
+		}, errors.New(msg)
+	}
+	rebuilt := flowspecRuleFromSpec(*ann)
+	rule.Protocol = rebuilt.Protocol
+	rule.DstPort = rebuilt.DstPort
+	rule.SrcPort = rebuilt.SrcPort
+	rule.Action = rebuilt.Action
+	rule.RateLimit = rebuilt.RateLimit
 
 	sp := bgp.Shared()
 	if sp == nil {
 		msg := "bgp speaker not configured: set up Settings → BGP Instance first"
+		markWithdrawFailed(ctx, s, result.AnnouncementID, result.Gen, msg)
 		return &store.ActionExecutionLog{
 			AttackID: attackDBID, ActionID: act.ID, ActionType: "bgp",
 			TriggerPhase: triggerPhase, ResponseName: responseName,
@@ -318,11 +352,7 @@ func flowspecWithdraw(ctx context.Context, s store.Store, conn *store.BGPConnect
 	wErr := sp.WithdrawFlowspec(ctx, rule)
 	durationMs := int(time.Since(t0).Milliseconds())
 	if wErr != nil {
-		if mErr := retryBGPStateWrite(func(writeCtx context.Context) error {
-			return s.BGPAnnouncements().MarkFailedWithdraw(writeCtx, result.AnnouncementID, result.Gen, wErr.Error())
-		}); mErr != nil {
-			metrics.StateWriteFailures.WithLabelValues("bgp_ann_state").Inc()
-		}
+		markWithdrawFailed(ctx, s, result.AnnouncementID, result.Gen, wErr.Error())
 		log.Printf("action: flowspec withdraw failed announcement_id=%d: %v", result.AnnouncementID, wErr)
 		return &store.ActionExecutionLog{
 			AttackID: attackDBID, ActionID: act.ID, ActionType: "bgp",

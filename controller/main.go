@@ -244,26 +244,29 @@ func main() {
 			RTBHNextHop: inst.RTBHNextHop,
 		})
 		if sErr := sp.Start(ctx); sErr != nil {
-			log.Fatalf("bgp: start speaker: %v", sErr)
-		}
-		bgp.SetShared(sp)
-		if conns, cErr := iStore.BGPConnectors().List(ctx); cErr == nil {
-			peers := make([]bgp.Peer, 0, len(conns))
-			for _, conn := range conns {
-				if !conn.Enabled || conn.NeighborIP == "" || conn.NeighborASN == 0 {
-					continue
+			// Fail closed: keep bgp.Shared() nil so BGP actions skip with
+			// speaker_not_configured instead of killing the controller.
+			log.Printf("ERROR bgp: start speaker failed: %v; BGP actions fail closed until the BGP Instance config is fixed", sErr)
+		} else {
+			bgp.SetShared(sp)
+			if conns, cErr := iStore.BGPConnectors().List(ctx); cErr == nil {
+				peers := make([]bgp.Peer, 0, len(conns))
+				for _, conn := range conns {
+					if !conn.Enabled || conn.NeighborIP == "" || conn.NeighborASN == 0 {
+						continue
+					}
+					peers = append(peers, bgp.Peer{
+						ConnectorID: conn.ID, Name: conn.Name,
+						NeighborIP: conn.NeighborIP, NeighborASN: uint32(conn.NeighborASN),
+						MD5Password: conn.MD5Password, AddressFamily: conn.AddressFamily,
+					})
 				}
-				peers = append(peers, bgp.Peer{
-					ConnectorID: conn.ID, Name: conn.Name,
-					NeighborIP: conn.NeighborIP, NeighborASN: uint32(conn.NeighborASN),
-					MD5Password: conn.MD5Password, AddressFamily: conn.AddressFamily,
-				})
+				if pErr := sp.SyncPeers(ctx, peers); pErr != nil {
+					log.Printf("bgp: initial peer sync: %v", pErr)
+				}
 			}
-			if pErr := sp.SyncPeers(ctx, peers); pErr != nil {
-				log.Printf("bgp: initial peer sync: %v", pErr)
-			}
+			log.Printf("bgp: speaker started asn=%d router-id=%s port=%d", inst.LocalASN, inst.RouterID, inst.ListenPort)
 		}
-		log.Printf("bgp: speaker started asn=%d router-id=%s port=%d", inst.LocalASN, inst.RouterID, inst.ListenPort)
 	} else {
 		log.Printf("bgp: no bgp_instance configured; BGP actions fail closed")
 	}

@@ -594,8 +594,9 @@ func (e *Engine) ReconcileOnStartup(ctx context.Context) {
 // reconcileBGPAnnouncing retries announce for rows stuck in 'announcing'
 // (process crashed between Attach and MarkAnnounced). Speaker announcements
 // are idempotent.
-// Startup retry failures retain announcing: this generation may already be in FRR
-// after a successful announce whose state write failed. RunAnnouncingReconcile only probes it.
+// Startup retry failures retain announcing: this generation may already be in
+// the speaker RIB after a successful announce whose state write failed.
+// RunAnnouncingReconcile re-announces it later.
 func (e *Engine) reconcileBGPAnnouncing(ctx context.Context) {
 	rows, err := e.store.BGPAnnouncements().ListByStatus(ctx, "announcing")
 	if err != nil {
@@ -649,8 +650,17 @@ func (e *Engine) retryBGPAnnounce(ann store.BGPAnnouncement) {
 		log.Printf("WARN action: retry announce announcement_id=%d prefix=%q route_map=%q gen=%d: speaker not configured; leaving announcing for runtime reconcile", ann.ID, ann.Prefix, ann.RouteMap, ann.Gen)
 		return
 	}
-	if err := sp.AnnounceBlackhole(ctx, ann.Prefix); err != nil {
-		log.Printf("WARN action: retry announce announcement_id=%d prefix=%q route_map=%q gen=%d: %v; leaving announcing for runtime reconcile", ann.ID, ann.Prefix, ann.RouteMap, ann.Gen, err)
+	// Kind-aware: a stuck flowspec row must re-install its stored rule, not a
+	// blackhole of the victim prefix (which MarkAnnounced would then make
+	// permanent). Mirrors reconcileAnnouncing.
+	var aErr error
+	if ann.Kind == "flowspec" {
+		aErr = sp.AnnounceFlowspec(ctx, flowspecRuleFromSpec(ann))
+	} else {
+		aErr = sp.AnnounceBlackhole(ctx, ann.Prefix)
+	}
+	if aErr != nil {
+		log.Printf("WARN action: retry announce announcement_id=%d prefix=%q route_map=%q gen=%d: %v; leaving announcing for runtime reconcile", ann.ID, ann.Prefix, ann.RouteMap, ann.Gen, aErr)
 		return
 	}
 	if err := e.store.BGPAnnouncements().MarkAnnounced(ctx, ann.ID, ann.Gen); err != nil && !bgpStateNotApplied(err, ann.ID, ann.Gen, "announced") {
@@ -684,8 +694,8 @@ func (e *Engine) retryBGPWithdraw(ann store.BGPAnnouncement, gen int) {
 
 // reconcileExecutingSchedules handles PR-3 leftover: a scheduled action was
 // marked executing but the process crashed before the side effect finished.
-// We retry the side effect (idempotent via 404 / "Can't find") and transition
-// the row to the right terminal state.
+// We retry the side effect (idempotent: xDrop DELETE 404, speaker withdraw of
+// a missing path) and transition the row to the right terminal state.
 func (e *Engine) reconcileExecutingSchedules(ctx context.Context) map[int]bool {
 	owned := make(map[int]bool)
 	// Query by direct SQL since ListPending filters to pending only.

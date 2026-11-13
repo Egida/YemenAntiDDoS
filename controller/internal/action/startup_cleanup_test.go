@@ -54,6 +54,15 @@ func (r fzWaitAnns) ListActive(context.Context) ([]store.BGPAnnouncement, error)
 	defer r.s.mu.Unlock()
 	return append([]store.BGPAnnouncement(nil), r.s.anns...), nil
 }
+func (r fzWaitAnns) Get(_ context.Context, id int) (*store.BGPAnnouncement, error) {
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	if id < 1 || id > len(r.s.anns) {
+		return nil, nil
+	}
+	ann := r.s.anns[id-1]
+	return &ann, nil
+}
 func (r fzWaitAnns) ListAttacks(_ context.Context, id int) ([]store.BGPAnnouncementAttack, error) {
 	r.s.mu.Lock()
 	defer r.s.mu.Unlock()

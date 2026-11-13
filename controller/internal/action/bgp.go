@@ -94,10 +94,9 @@ func executeBGP(ctx context.Context, s store.Store, engine *Engine, act store.Re
 		}
 	}
 
-	if conn.FlowspecEnabled {
-		return executeBGPFlowspec(ctx, s, conn, act, attack, dstIP, attackDBID, responseName, triggerPhase)
-	}
-
+	// Speaker guard comes before the flowspec/RTBH split so both kinds fail
+	// closed identically (skip, no announcement row) when no BGP Instance is
+	// configured.
 	sp := bgp.Shared()
 	if sp == nil {
 		return recordSkip(&store.ActionExecutionLog{
@@ -112,6 +111,10 @@ func executeBGP(ctx context.Context, s store.Store, engine *Engine, act store.Re
 			ErrorMessage:  "bgp speaker not configured: set up Settings → BGP Instance first",
 			ExecutedAt:    time.Now(),
 		}, SkipReasonSpeakerNotConfigured), nil
+	}
+
+	if conn.FlowspecEnabled {
+		return executeBGPFlowspec(ctx, s, conn, act, attack, dstIP, attackDBID, responseName, triggerPhase)
 	}
 
 	switch triggerPhase {
@@ -224,7 +227,7 @@ func bgpAnnounce(ctx context.Context, s store.Store, engine *Engine, conn *store
 	sp := bgp.Shared()
 	if sp == nil {
 		msg := "bgp speaker not configured: set up Settings → BGP Instance first"
-		markFlowspecAnnounceFailed(ctx, s, attachResult, errors.New(msg))
+		markAnnounceFailed(ctx, s, attachResult, errors.New(msg))
 		return &store.ActionExecutionLog{
 			AttackID:       attackDBID,
 			ActionID:       act.ID,
@@ -599,9 +602,21 @@ func performBGPWithdraw(ctx context.Context, s store.Store, conn *store.BGPConne
 
 	t0 := time.Now()
 	sp := bgp.Shared()
+	requestBody := "blackhole " + dstIP
 	var wErr error
 	if sp == nil {
 		wErr = errors.New("bgp speaker not configured")
+	} else if ann, gErr := s.BGPAnnouncements().Get(ctx, announcementID); gErr != nil {
+		// Fail closed: guessing the kind could delete the wrong path.
+		wErr = fmt.Errorf("announcement lookup: %w", gErr)
+	} else if ann == nil {
+		wErr = fmt.Errorf("announcement %d not found", announcementID)
+	} else if ann.Kind == "flowspec" {
+		// Flowspec announcements withdraw the stored rule — its match
+		// components cannot be derived from the prefix alone.
+		rule := flowspecRuleFromSpec(*ann)
+		requestBody = flowspec.Describe(rule)
+		wErr = sp.WithdrawFlowspec(ctx, rule)
 	} else {
 		wErr = sp.WithdrawBlackhole(ctx, dstIP)
 	}
@@ -624,7 +639,7 @@ func performBGPWithdraw(ctx context.Context, s store.Store, conn *store.BGPConne
 			Status:         "failed",
 			ErrorMessage:   fmt.Sprintf("speaker: %v", wErr) + stateError,
 			Detail:         stateDetail,
-			RequestBody:    "blackhole " + dstIP,
+			RequestBody:    requestBody,
 			ExternalRuleID: externalRuleID,
 			DurationMs:     durationMs,
 			ExecutedAt:     t0,
@@ -648,7 +663,7 @@ func performBGPWithdraw(ctx context.Context, s store.Store, conn *store.BGPConne
 		Status:         "success",
 		ErrorMessage:   strings.TrimPrefix(stateError, "; "),
 		Detail:         stateDetail,
-		RequestBody:    "blackhole " + dstIP,
+		RequestBody:    requestBody,
 		ExternalRuleID: externalRuleID,
 		DurationMs:     durationMs,
 		ExecutedAt:     t0,
@@ -688,10 +703,14 @@ func RecoverBGPRoutes(ctx context.Context, s store.Store) {
 }
 
 // flowspecRuleFromSpec rebuilds the rule from a flowspec announcement row.
+// Unparseable rule_spec falls back to the row's identity fields; the failure
+// is logged so a corrupt row is visible instead of silently broadening.
 func flowspecRuleFromSpec(ann store.BGPAnnouncement) flowspec.Rule {
 	var rule flowspec.Rule
 	if strings.TrimSpace(ann.RuleSpec) != "" {
-		_ = json.Unmarshal([]byte(ann.RuleSpec), &rule)
+		if err := json.Unmarshal([]byte(ann.RuleSpec), &rule); err != nil {
+			log.Printf("WARN bgp: announcement %d rule_spec unmarshal failed, using fallback rule: %v", ann.ID, err)
+		}
 	}
 	if rule.Name == "" {
 		rule.Name = ann.RouteMap

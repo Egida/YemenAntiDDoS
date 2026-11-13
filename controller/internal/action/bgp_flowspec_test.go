@@ -166,3 +166,62 @@ func TestRecoverBGPRoutesRestoresSpeakerPaths(t *testing.T) {
 		t.Fatalf("announce calls=%d flowspec calls=%d", fake.Count("announce_blackhole"), fake.Count("announce_flowspec"))
 	}
 }
+
+func TestRetryBGPAnnounceFlowspecReinstallsRule(t *testing.T) {
+	s, _, _ := dao3BGPFixture(t)
+	fake := bgp.Shared().(*bgp.FakeSpeaker)
+	ann := store.BGPAnnouncement{
+		ID: 1, Prefix: "198.51.100.7/32", RouteMap: "xsight-flow", ConnectorID: 7,
+		Status: "announcing", Kind: "flowspec",
+		RuleSpec: `{"Name":"xsight-flow","Prefix":"198.51.100.7/32","Protocol":6,"Action":"drop"}`,
+	}
+	NewEngine(s, "auto").retryBGPAnnounce(ann)
+	if fake.Count("announce_flowspec") != 1 {
+		t.Fatalf("announce_flowspec=%d want 1", fake.Count("announce_flowspec"))
+	}
+	if fake.Count("announce_blackhole") != 0 {
+		t.Fatalf("announce_blackhole=%d want 0 (flowspec must not blackhole the victim prefix)", fake.Count("announce_blackhole"))
+	}
+	if len(fake.Rules) != 1 || fake.Rules[0].Protocol == nil || *fake.Rules[0].Protocol != 6 {
+		t.Fatalf("announced rules=%+v want one tcp rule", fake.Rules)
+	}
+}
+
+func TestPerformBGPWithdrawFlowspecKindAware(t *testing.T) {
+	s, act, _ := dao3BGPFixture(t)
+	fake := bgp.Shared().(*bgp.FakeSpeaker)
+	s.ann.rows = []store.BGPAnnouncement{
+		{ID: 1, Prefix: "198.51.100.7/32", RouteMap: "xsight-flow", ConnectorID: 7,
+			Status: "withdrawing", Kind: "flowspec",
+			RuleSpec: `{"Name":"xsight-flow","Prefix":"198.51.100.7/32","Protocol":6,"Action":"drop"}`},
+	}
+	conn := s.conn
+	log, err := performBGPWithdraw(context.Background(), s, &conn, act, "198.51.100.7/32", "xsight-flow", 20, 1, 0, "test", "on_expired")
+	if err != nil || log == nil || log.Status != "success" {
+		t.Fatalf("withdraw log=%+v err=%v", log, err)
+	}
+	if fake.Count("withdraw_flowspec") != 1 {
+		t.Fatalf("withdraw_flowspec=%d want 1", fake.Count("withdraw_flowspec"))
+	}
+	if fake.Count("withdraw_blackhole") != 0 {
+		t.Fatalf("withdraw_blackhole=%d want 0 (flowspec must not delete a blackhole path)", fake.Count("withdraw_blackhole"))
+	}
+}
+
+func TestExecuteBGPFlowspecWithoutSpeakerSkips(t *testing.T) {
+	s, act, _ := dao3BGPFixture(t)
+	bgp.SetShared(nil)
+	conn := s.conn
+	conn.FlowspecEnabled = true
+	attack := &store.Attack{DstIP: "198.51.100.7/32", DecoderFamily: "tcp_syn"}
+	log, err := executeBGP(context.Background(), s, nil, act, attack, "detected", "198.51.100.7/32", "test", "on_detected", 20, nil)
+	if err != nil || log == nil {
+		t.Fatalf("log=%+v err=%v", log, err)
+	}
+	if log.Status != "skipped" || log.SkipReason != SkipReasonSpeakerNotConfigured {
+		t.Fatalf("status=%q skip_reason=%q", log.Status, log.SkipReason)
+	}
+	if len(s.ann.rows) != 0 {
+		t.Fatalf("announcement rows=%d want 0 (speaker guard runs before attach)", len(s.ann.rows))
+	}
+}

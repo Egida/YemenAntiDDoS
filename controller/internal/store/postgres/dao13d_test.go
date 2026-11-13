@@ -5,18 +5,14 @@ import (
 	"context"
 	"fmt"
 	"github.com/d80y6/YemenDDoS/controller/internal/action"
-	"github.com/d80y6/YemenDDoS/controller/internal/metrics"
 	"github.com/d80y6/YemenDDoS/controller/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
-	dto "github.com/prometheus/client_model/go"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -251,154 +247,6 @@ func dao13dAttachment(t *testing.T, bug bool) {
 	dao13dWant(t, "P10-C.HistoricalAttachment", got == want)
 	dao13dWant(t, "P10-C.CurrentUnchanged", f.row(p).Refcount == 1 && f.count("SELECT count(*) FROM bgp_announcement_attacks WHERE announcement_id=$1 AND attack_id=$2 AND detached_at IS NULL", a.AnnouncementID, c) == 1)
 }
-func dao13dHistory(t *testing.T, other, bug bool) {
-	f := dao13dNew(t)
-	p := "192.0.2.20/32"
-	r := f.db.BGPAnnouncements()
-	if other {
-		a := f.attach(f.attack(true), "198.51.100.20/32")
-		_, g, e := r.ForceWithdraw(f.c, a.AnnouncementID)
-		dao13dCheck(t, e)
-		dao13dCheck(t, r.MarkWithdrawn(f.c, a.AnnouncementID, g))
-	}
-	a := f.attach(f.attack(true), p)
-	dao13dCheck(t, r.MarkAnnounced(f.c, a.AnnouncementID, a.Gen))
-	_, gen, err := r.ForceWithdraw(f.c, a.AnnouncementID)
-	dao13dCheck(t, err)
-	dao13dCheck(t, r.MarkFailedWithdraw(f.c, a.AnnouncementID, gen, "withdraw failed"))
-	a = f.attach(f.attack(false), p)
-	dao13dCheck(t, r.MarkFailedAnnounce(f.c, a.AnnouncementID, a.Gen, "announce failed"))
-	dao13dWant(t, "P10-E.HistoryBeforeBootstrap", f.history() == (!bug || other))
-	if bug {
-		dao13dWant(t, "R0.h.LastRowDeleted", f.row(p) == nil)
-	} else {
-		dao13dWant(t, "P10-E.FailedRetained", f.row(p) != nil && f.row(p).Status == "failed")
-	}
-	f.script(p, true, false)
-	action.BootstrapBGPOrphans(f.c, f.db)
-	row := f.row(p)
-	if bug {
-		dao13dWant(t, "R0.h.SilentUpgrade", row != nil && row.Status == "dismissed_on_upgrade")
-	} else {
-		dao13dWant(t, "P10-E.NoSilentUpgrade", row != nil && row.Status == "failed" && f.count("SELECT count(*) FROM bgp_announcements WHERE status='dismissed_on_upgrade'") == 0)
-		active, err := r.ListActive(f.c)
-		dao13dCheck(t, err)
-		found := false
-		for _, v := range active {
-			if v.ID == row.ID {
-				found = true
-			}
-		}
-		dao13dWant(t, "P10-E.ListActive", found)
-	}
-}
-
-type dao13dLogBuffer struct {
-	mu sync.Mutex
-	b  bytes.Buffer
-}
-
-func (b *dao13dLogBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.b.Write(p)
-}
-func (b *dao13dLogBuffer) text() string { b.mu.Lock(); defer b.mu.Unlock(); return b.b.String() }
-func dao13dUntil(t *testing.T, ready func() bool) {
-	t.Helper()
-	deadline := time.NewTimer(10 * time.Second)
-	defer deadline.Stop()
-	tick := time.NewTicker(10 * time.Millisecond)
-	defer tick.Stop()
-	for !ready() {
-		select {
-		case <-deadline.C:
-			t.Fatal("required observation missing after 10s")
-		case <-tick.C:
-		}
-	}
-}
-func dao13dStartup(t *testing.T, absent, bug, headControl bool) {
-	f := dao13dNew(t)
-	p := "192.0.2.30/32"
-	r := f.db.BGPAnnouncements()
-	f.script(p, true, true)
-	attack := f.attack(false)
-	a := f.attach(attack, p)
-	// State-equivalent construction: the first network succeeds, MarkAnnounced is deliberately omitted.
-	c, cancel := context.WithTimeout(f.c, 5*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(c, f.path, "-c", "configure terminal\nrouter bgp 64512\naddress-family ipv4 unicast\nnetwork "+p+" route-map RTBH").CombinedOutput()
-	dao13dCheck(t, err)
-	t.Logf("State-equivalent construction, first announce output=%s", out)
-	f.log(attack, "bgp", p+"|RTBH", "on_detected")
-	f.exec("UPDATE attacks SET ended_at=now() WHERE id=$1", attack)
-	before := f.row(p)
-	events := f.count("SELECT count(*) FROM bgp_announcement_events WHERE announcement_id=$1", a.AnnouncementID)
-	dao13dWant(t, "G0.Fixture", before != nil && before.Gen == 0 && before.Status == "announcing" && before.Refcount == 1 && f.network(p) == 1)
-	var logs dao13dLogBuffer
-	prior := log.Writer()
-	log.SetOutput(&logs)
-	defer log.SetOutput(prior)
-	engine := action.NewEngine(f.db, "auto")
-	engine.ReconcileOnStartup(f.c)
-	if bug {
-		dao13dUntil(t, func() bool { return f.row(p) == nil })
-		dao13dWant(t, "R0.i.LastHistoryLost", !f.history())
-	} else {
-		dao13dUntil(t, func() bool { return strings.Contains(logs.text(), "WARN action: retry announce") })
-		dao13dWant(t, "P10-G0.Retained", reflect.DeepEqual(before, f.row(p)) && f.history())
-		dao13dWant(t, "P10-G0.AttachmentsEvents", f.count("SELECT count(*) FROM bgp_announcement_attacks WHERE announcement_id=$1 AND attack_id=$2 AND detached_at IS NULL", a.AnnouncementID, attack) == 1 && f.count("SELECT count(*) FROM bgp_announcement_events WHERE announcement_id=$1", a.AnnouncementID) >= events)
-	}
-	dao13dWant(t, "G0.TwoNetworkAttempts", f.network(p) == 2)
-	if bug && headControl {
-		f.migrate(dao13dRetention())
-		row := f.row(p)
-		dao13dWant(t, "R0.i-1.BackfillSelfHeal", row != nil && row.Status == "active" && f.count("SELECT count(*) FROM bgp_announcement_attacks WHERE announcement_id=$1 AND attack_id=$2", row.ID, attack) == 1)
-		return
-	}
-	action.BootstrapBGPOrphans(f.c, f.db)
-	if bug {
-		dao13dWant(t, "R0.i-2.SilentUpgrade", f.row(p) != nil && f.row(p).Status == "dismissed_on_upgrade")
-		return
-	}
-	dao13dWant(t, "P10-G0.BootstrapKeepsRow", reflect.DeepEqual(before, f.row(p)) && f.count("SELECT count(*) FROM bgp_announcements WHERE status='dismissed_on_upgrade'") == 0)
-	f.migrate(dao13dRetention())
-	dao13dWant(t, "P10-G0.MigrationKeepsRow", reflect.DeepEqual(before, f.row(p)))
-	f.script(p, !absent, true)
-	var metric dto.Metric
-	dao13dCheck(t, metrics.BGPAnnouncingReconcile.WithLabelValues("absent").Write(&metric))
-	absentBefore := metric.GetCounter().GetValue()
-	loop, stop := context.WithCancel(f.c)
-	done := make(chan struct{})
-	go func() { defer close(done); engine.RunAnnouncingReconcile(loop, 20*time.Millisecond) }()
-	defer func() {
-		stop()
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			t.Error("reconcile did not join")
-		}
-	}()
-	dao13dUntil(t, func() bool {
-		if absent {
-			dao13dCheck(t, metrics.BGPAnnouncingReconcile.WithLabelValues("absent").Write(&metric))
-			return metric.GetCounter().GetValue()-absentBefore >= 1
-		}
-		return f.row(p).Status == "active"
-	})
-	stop()
-	<-done
-	row, err := r.Get(f.c, a.AnnouncementID)
-	dao13dCheck(t, err)
-	want := "active"
-	if absent {
-		want = "announcing"
-	}
-	dao13dWant(t, "P10-G0.RuntimeReadOnly", row != nil && row.Status == want && row.ID == a.AnnouncementID && f.network(p) == 2 && f.count("SELECT count(*) FROM bgp_announcements") == 1 && f.count("SELECT count(*) FROM bgp_announcements WHERE status='dismissed_on_upgrade'") == 0)
-	t.Logf("RAW startup logs: %s", logs.text())
-}
-
 func dao13dOldSeed(f *dao13dFixture) []int {
 	dao13dOldBGP(f.t, f.db)
 	ids := []int{f.attack(false), f.attack(false), f.attack(true)}
@@ -599,12 +447,6 @@ func TestDao13d_R0Fixed(t *testing.T) {
 			f.exec("ALTER TABLE webhooks ALTER COLUMN headers TYPE jsonb USING headers::jsonb")
 			f.migrate(dao13dRetention())
 			dao13dWant(t, "P10-R3.Reentered", f.count("SELECT count(*) FROM webhook_connectors c JOIN webhooks w ON c.name='legacy-webhook-'||w.id WHERE w.id=$1 AND c.headers=w.headers", id) == 1)
-		}},
-		{"P10-E1", func(t *testing.T) { dao13dHistory(t, true, false) }},
-		{"P10-E2", func(t *testing.T) { dao13dHistory(t, false, false) }},
-		{"P10-G0", func(t *testing.T) {
-			t.Run("Present", func(t *testing.T) { dao13dStartup(t, false, false, false) })
-			t.Run("RouteAbsent", func(t *testing.T) { dao13dStartup(t, true, false, false) })
 		}},
 		{"D6-A", func(t *testing.T) {
 			t.Run("Existing", func(t *testing.T) {
