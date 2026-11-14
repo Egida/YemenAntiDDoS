@@ -147,8 +147,18 @@ func (dao11cAnnouncements) CountLiveByConnector(context.Context, int) (int, erro
 	return 0, nil
 }
 
-func (s *dao11cStore) BGPConnectors() store.BGPConnectorRepo       { return s.bgps }
-func (s *dao11cStore) BGPInstances() store.BGPInstanceRepo         { return s.bgpInstance }
+func (s *dao11cStore) BGPConnectors() store.BGPConnectorRepo { return s.bgps }
+func (s *dao11cStore) BGPInstances() store.BGPInstanceRepo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.writes == nil {
+		s.writes = map[string]int{}
+	}
+	if s.bgpInstance == nil {
+		s.bgpInstance = &dao11cBGPInstances{s: s}
+	}
+	return s.bgpInstance
+}
 func (s *dao11cStore) BGPAnnouncements() store.BGPAnnouncementRepo { return dao11cAnnouncements{} }
 func (s *dao11cStore) Thresholds() store.ThresholdRepo             { return s.thresholds }
 func (s *dao11cStore) Prefixes() store.PrefixRepo                  { return s.prefixes }

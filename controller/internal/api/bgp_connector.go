@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 
@@ -14,10 +15,23 @@ import (
 	"github.com/d80y6/YemenDDoS/controller/internal/store"
 )
 
+// The controller is single-instance; these mutexes serialize connector
+// read-modify-write operations and the DB-list-to-speaker-sync sequence.
+var (
+	bgpConnectorUpdateMu sync.Mutex
+	bgpPeerSyncMu        sync.Mutex
+)
+
 // syncBGPSpeakerPeers pushes current enabled connectors with peering details
 // into the embedded speaker. Best-effort: DB state is authoritative; the
 // next CRUD operation retries.
 func syncBGPSpeakerPeers(c *gin.Context, deps Dependencies) error {
+	bgpPeerSyncMu.Lock()
+	defer bgpPeerSyncMu.Unlock()
+	return syncBGPSpeakerPeersLocked(c, deps)
+}
+
+func syncBGPSpeakerPeersLocked(c *gin.Context, deps Dependencies) error {
 	sp := bgp.Shared()
 	if sp == nil {
 		return nil
@@ -138,13 +152,15 @@ func createBGPConnector(deps Dependencies) gin.HandlerFunc {
 			NeighborASN:     neighborASN,
 			MD5Password:     req.MD5Password,
 		}
+		bgpPeerSyncMu.Lock()
+		defer bgpPeerSyncMu.Unlock()
 		id, err := deps.Store.BGPConnectors().Create(c, conn)
 		if err != nil {
 			dbError(c, "bgp connector ", err)
 			return
 		}
 		conn.ID = id
-		if err := syncBGPSpeakerPeers(c, deps); err != nil {
+		if err := syncBGPSpeakerPeersLocked(c, deps); err != nil {
 			log.Printf("api: bgp peer sync after connector create: %v", err)
 		}
 		publishAfterChange(c, deps, "bgp_connector", strconv.Itoa(id), "create", makeDiff(nil, conn))
@@ -155,6 +171,10 @@ func createBGPConnector(deps Dependencies) gin.HandlerFunc {
 func updateBGPConnector(deps Dependencies) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id, _ := strconv.Atoi(c.Param("id"))
+		bgpConnectorUpdateMu.Lock()
+		defer bgpConnectorUpdateMu.Unlock()
+		bgpPeerSyncMu.Lock()
+		defer bgpPeerSyncMu.Unlock()
 		conn, err := deps.Store.BGPConnectors().Get(c, id)
 		if err != nil {
 			errResponse(c, http.StatusNotFound, "bgp connector not found")
@@ -240,7 +260,7 @@ func updateBGPConnector(deps Dependencies) gin.HandlerFunc {
 			dbError(c, "bgp connector ", err)
 			return
 		}
-		if err := syncBGPSpeakerPeers(c, deps); err != nil {
+		if err := syncBGPSpeakerPeersLocked(c, deps); err != nil {
 			log.Printf("api: bgp peer sync after connector update: %v", err)
 		}
 		if conn.Enabled && deps.ActionEngine != nil {
@@ -254,6 +274,8 @@ func updateBGPConnector(deps Dependencies) gin.HandlerFunc {
 func deleteBGPConnector(deps Dependencies) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id, _ := strconv.Atoi(c.Param("id"))
+		bgpPeerSyncMu.Lock()
+		defer bgpPeerSyncMu.Unlock()
 		count, err := deps.Store.Responses().CountActionsByBGPConnector(c, id)
 		if err != nil {
 			dbError(c, "bgp connector ", err)
@@ -277,7 +299,7 @@ func deleteBGPConnector(deps Dependencies) gin.HandlerFunc {
 			dbError(c, "bgp connector ", err)
 			return
 		}
-		if err := syncBGPSpeakerPeers(c, deps); err != nil {
+		if err := syncBGPSpeakerPeersLocked(c, deps); err != nil {
 			log.Printf("api: bgp peer sync after connector delete: %v", err)
 		}
 		if old != nil {
@@ -296,6 +318,14 @@ func testBGPConnector(deps Dependencies) gin.HandlerFunc {
 			errResponse(c, http.StatusNotFound, "bgp connector not found")
 			return
 		}
+		if !conn.Enabled {
+			errResponse(c, http.StatusConflict, "connector is disabled")
+			return
+		}
+		if conn.NeighborIP == "" || conn.NeighborASN == 0 {
+			errResponse(c, http.StatusConflict, "connector has no peering details configured")
+			return
+		}
 		sp := bgp.Shared()
 		if sp == nil {
 			errResponse(c, http.StatusConflict, "bgp speaker not configured (Settings → BGP Instance)")
@@ -311,6 +341,6 @@ func testBGPConnector(deps Dependencies) gin.HandlerFunc {
 				return
 			}
 		}
-		errResponse(c, http.StatusConflict, "connector has no peering details configured")
+		errResponse(c, http.StatusConflict, "peer not present in the running speaker (session not established yet or peer sync pending)")
 	}
 }

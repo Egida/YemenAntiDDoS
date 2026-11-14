@@ -25,6 +25,7 @@ type GobgpSpeaker struct {
 	cfg Config
 
 	mu        sync.Mutex
+	peersMu   sync.RWMutex
 	srv       *server.BgpServer
 	uuids     map[string][]byte // pathKey -> AddPath uuid
 	peers     map[int]Peer      // connectorID -> last synced peer
@@ -78,9 +79,11 @@ func (s *GobgpSpeaker) Start(_ context.Context) error {
 	s.stopCh = make(chan struct{})
 	s.stop = sync.Once{}
 	s.uuids = map[string][]byte{}
-	s.peers = map[int]Peer{}
 	s.peerGauge = map[string]bool{}
 	s.mu.Unlock()
+	s.peersMu.Lock()
+	s.peers = map[int]Peer{}
+	s.peersMu.Unlock()
 	srv := server.NewBgpServer()
 	go srv.Serve()
 	ctx, cancel := context.WithTimeout(context.Background(), speakerTimeout)
@@ -215,7 +218,10 @@ func (s *GobgpSpeaker) SyncPeers(ctx context.Context, peers []Peer) error {
 	// connectors, collapse last-writer-wins for console attribution only;
 	// the session config sent to gobgp remains correct.
 	for addr, p := range desired {
-		if old, ok := s.peers[p.ConnectorID]; ok && existing[addr] &&
+		s.peersMu.RLock()
+		old, ok := s.peers[p.ConnectorID]
+		s.peersMu.RUnlock()
+		if ok && existing[addr] &&
 			old.NeighborASN == p.NeighborASN && old.MD5Password == p.MD5Password &&
 			old.AddressFamily == p.AddressFamily && old.RemotePort == p.RemotePort {
 			continue
@@ -238,12 +244,12 @@ func (s *GobgpSpeaker) SyncPeers(ctx context.Context, peers []Peer) error {
 			}
 		}
 	}
-	s.mu.Lock()
+	s.peersMu.Lock()
 	s.peers = map[int]Peer{}
 	for _, p := range desired {
 		s.peers[p.ConnectorID] = p
 	}
-	s.mu.Unlock()
+	s.peersMu.Unlock()
 	return nil
 }
 
@@ -251,12 +257,12 @@ func (s *GobgpSpeaker) SyncPeers(ctx context.Context, peers []Peer) error {
 func (s *GobgpSpeaker) PeerStates(ctx context.Context) []PeerState {
 	cctx, cancel := context.WithTimeout(ctx, speakerTimeout)
 	defer cancel()
-	s.mu.Lock()
+	s.peersMu.RLock()
 	byAddr := map[string]Peer{}
 	for _, p := range s.peers {
 		byAddr[normalizeAddr(p.NeighborIP)] = p
 	}
-	s.mu.Unlock()
+	s.peersMu.RUnlock()
 	out := []PeerState{}
 	if err := s.server().ListPeer(cctx, &api.ListPeerRequest{}, func(p *api.Peer) {
 		addr := normalizeAddr(p.Conf.GetNeighborAddress())

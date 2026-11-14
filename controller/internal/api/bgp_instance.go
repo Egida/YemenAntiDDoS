@@ -4,12 +4,16 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/d80y6/YemenDDoS/controller/internal/bgp"
 	"github.com/d80y6/YemenDDoS/controller/internal/store"
 )
+
+// The controller is single-instance; this mutex serializes partial updates.
+var bgpInstanceUpdateMu sync.Mutex
 
 func getBGPInstance(deps Dependencies) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -38,6 +42,8 @@ func updateBGPInstance(deps Dependencies) gin.HandlerFunc {
 			errResponse(c, http.StatusBadRequest, err.Error())
 			return
 		}
+		bgpInstanceUpdateMu.Lock()
+		defer bgpInstanceUpdateMu.Unlock()
 		inst, err := deps.Store.BGPInstances().Get(c)
 		if err != nil {
 			dbError(c, "bgp instance ", err)
@@ -86,7 +92,7 @@ func updateBGPInstance(deps Dependencies) gin.HandlerFunc {
 		}
 		publishAfterChange(c, deps, "bgp_instance", "1", "update",
 			jsonOrNil(map[string]any{"local_asn": inst.LocalASN, "router_id": inst.RouterID}))
-		ok(c, gin.H{"ok": true, "restart_required": bgp.Shared() != nil,
+		ok(c, gin.H{"ok": true, "restart_required": true,
 			"note": "instance identity changes take effect after controller restart"})
 	}
 }

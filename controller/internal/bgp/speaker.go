@@ -1,6 +1,6 @@
 // Package bgp embeds a GoBGP speaker so the controller originates BGP
 // Flowspec (RFC 8955) and RTBH blackhole routes over real BGP sessions,
-// replacing the retired local-FRR/vtysh execution model.
+// replacing the retired external-router execution model.
 package bgp
 
 import (

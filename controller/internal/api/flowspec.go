@@ -69,6 +69,17 @@ func ruleFromAnnouncement(a store.BGPAnnouncement) flowspec.Rule {
 	return rule
 }
 
+func strictRuleFromAnnouncement(a store.BGPAnnouncement) (flowspec.Rule, error) {
+	if strings.TrimSpace(a.RuleSpec) == "" {
+		return flowspec.Rule{Name: a.RouteMap, Prefix: a.Prefix, Action: flowspec.ActionDrop}, nil
+	}
+	var rule flowspec.Rule
+	if err := json.Unmarshal([]byte(a.RuleSpec), &rule); err != nil {
+		return flowspec.Rule{}, fmt.Errorf("announcement %d rule_spec invalid: %w", a.ID, err)
+	}
+	return rule, nil
+}
+
 func buildFlowspecView(a store.BGPAnnouncement, conn *store.BGPConnector) flowspecView {
 	name := ""
 	if conn != nil {
@@ -190,7 +201,17 @@ func forceWithdrawFlowspec(deps Dependencies) gin.HandlerFunc {
 			return
 		}
 
-		rule := ruleFromAnnouncement(*ann)
+		rule, ruleErr := strictRuleFromAnnouncement(*ann)
+		if ruleErr != nil {
+			log.Printf("api: flowspec force withdraw announcement_id=%d: %v", ann.ID, ruleErr)
+			errResponse(c, http.StatusConflict, "flowspec announcement has malformed rule_spec; refusing withdrawal")
+			return
+		}
+		if ruleErr = rule.Validate(); ruleErr != nil {
+			log.Printf("api: flowspec force withdraw announcement_id=%d: invalid rule: %v", ann.ID, ruleErr)
+			errResponse(c, http.StatusConflict, "flowspec announcement has an invalid rule; refusing withdrawal")
+			return
+		}
 		_, gen, err := deps.Store.BGPAnnouncements().ForceWithdraw(c, ann.ID)
 		if err != nil {
 			dbError(c, "", err)
