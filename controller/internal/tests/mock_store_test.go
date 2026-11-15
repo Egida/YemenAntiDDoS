@@ -220,7 +220,12 @@ func (m *MockStore) FlowLogs() store.FlowLogRepo                     { return m.
 func (m *MockStore) FlowListeners() store.FlowListenerRepo           { return m.flowListenerRepo }
 func (m *MockStore) FlowSources() store.FlowSourceRepo               { return m.flowSourceRepo }
 func (m *MockStore) BGPConnectors() store.BGPConnectorRepo           { return m.bgpConnectors }
-func (m *MockStore) BGPInstances() store.BGPInstanceRepo             { return m.bgpInstanceRepo }
+func (m *MockStore) BGPInstances() store.BGPInstanceRepo {
+	if m.bgpInstanceRepo == nil {
+		m.bgpInstanceRepo = &stubBGPInstanceRepo{}
+	}
+	return m.bgpInstanceRepo
+}
 func (m *MockStore) ManualOverrides() store.ActionManualOverrideRepo { return m.manualOverrides }  // v1.2 PR-2
 func (m *MockStore) ScheduledActions() store.ScheduledActionRepo     { return m.scheduledActions } // v1.2 PR-3
 func (m *MockStore) XDropActiveRules() store.XDropActiveRuleRepo     { return m.xdropActiveRules } // v1.2 PR-4

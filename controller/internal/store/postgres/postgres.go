@@ -1564,6 +1564,21 @@ var migrations = []string{
 	             AND attname = 'bgp_asn' AND atttypid = 'int4'::regtype) THEN
 	    ALTER TABLE bgp_connectors ALTER COLUMN bgp_asn TYPE BIGINT;
 	  END IF;
+	  IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'bgp_connectors'::regclass
+	             AND attname = 'neighbor_asn' AND atttypid = 'int4'::regtype) THEN
+	    ALTER TABLE bgp_connectors ALTER COLUMN neighbor_asn TYPE BIGINT;
+	  END IF;
+	END $$`,
+	`DO $$ BEGIN
+	  IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'bgp_instance'::regclass
+	             AND attname = 'local_asn' AND atttypid = 'int4'::regtype) THEN
+	    ALTER TABLE bgp_instance ALTER COLUMN local_asn TYPE BIGINT;
+	  END IF;
+	  IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'bgp_instance'::regclass
+	             AND attname = 'updated_at' AND attnotnull = false) THEN
+	    UPDATE bgp_instance SET updated_at = now() WHERE updated_at IS NULL;
+	    ALTER TABLE bgp_instance ALTER COLUMN updated_at SET NOT NULL;
+	  END IF;
 	END $$`,
 }
 
