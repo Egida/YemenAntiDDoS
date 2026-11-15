@@ -108,8 +108,10 @@ export interface Message { key: string; args?: Record<string, string | number> }
 export function connectorCheck(kind: Kind, form: Form, row?: ConnectorRow): Message | undefined {
   const error = (key: string, args?: Message['args']) => ({ key, args })
   if (!form.name.trim()) return error(kind === 'shell' ? 'shellNameRequired' : 'nameRequired')
-  if (kind === 'bgp' && form.enabled && (!form.neighbor_ip.trim() || !form.neighbor_asn)) {
-    return error('neighborRequired')
+  if (kind === 'bgp') {
+    const asn = Number(form.neighbor_asn)
+    if (form.enabled && (!form.neighbor_ip.trim() || !asn)) return error('neighborRequired')
+    if (asn && (!Number.isInteger(asn) || asn < 1 || asn > 4294967295)) return error('neighborRequired')
   }
   if (kind === 'xdrop') {
     if (!normalizeURL(form.api_url)) return error('apiUrlRequired')

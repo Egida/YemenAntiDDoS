@@ -1,17 +1,15 @@
 <script setup lang="ts">
-import { ref, shallowRef, onMounted, onUnmounted, computed } from 'vue'
+import { ref, shallowRef, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { request } from '../../api/client'
 import { dateTime, fullDateTime, thousands } from '../../format'
 import { isAdmin } from '../../auth'
 import { notify } from '../../notifications'
 import XConfirm from '../../components/XConfirm.vue'
-import XTip from '../../components/XTip.vue'
 import XEmpty from '../../components/XEmpty.vue'
 import XDrawer from '../../components/XDrawer.vue'
 import XCopy from '../../components/XCopy.vue'
 import XPill from '../../components/XPill.vue'
-import XBadge from '../../components/XBadge.vue'
 
 const { t } = useI18n()
 
