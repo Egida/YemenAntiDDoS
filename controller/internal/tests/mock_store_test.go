@@ -1492,6 +1492,20 @@ func (r *mockXDropActiveRuleRepo) MarkWithdrawing(_ context.Context, attackID, a
 	return false, nil
 }
 
+func (r *mockXDropActiveRuleRepo) ClaimActive(_ context.Context, attackID, actionID, connectorID int, externalRuleID string) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	idx := r.findIdxLocked(attackID, actionID, connectorID, externalRuleID)
+	if idx < 0 {
+		return false, nil
+	}
+	if r.records[idx].Status != "active" {
+		return false, nil
+	}
+	r.records[idx].Status = "withdrawing"
+	return true, nil
+}
+
 func (r *mockXDropActiveRuleRepo) MarkWithdrawn(_ context.Context, attackID, actionID, connectorID int, externalRuleID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
