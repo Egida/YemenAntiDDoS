@@ -32,20 +32,12 @@ interface AttackRef {
   detached_at?: string
 }
 
-interface VendorInfo {
-  id: string
-  name: string
-  executable: boolean
-}
-
 interface Announcement {
   announcement_id: number
   prefix: string
   rule_name: string
   connector_id: number
   connector_name: string
-  vendor: string
-  executable: boolean
   status: string
   refcount: number
   error_message?: string
@@ -53,18 +45,15 @@ interface Announcement {
   delay_started_at?: string
   delay_minutes: number
   rule?: Rule
-  commands?: string[]
-  withdraw_commands?: string[]
+  match?: string
   attacks?: AttackRef[]
 }
 
 interface AnnouncementsResp {
   announcements: Announcement[]
-  vendors: VendorInfo[]
 }
 
 interface PreviewReq {
-  vendor: string
   name: string
   prefix: string
   protocol?: number
@@ -75,15 +64,11 @@ interface PreviewReq {
 }
 
 interface PreviewResp {
-  vendor: string
   rule: Rule
-  commands: string[]
-  withdraw_commands: string[]
-  executable: boolean
+  match: string
 }
 
 const announcements = shallowRef<Announcement[]>([])
-const vendors = shallowRef<VendorInfo[]>([])
 const loading = ref(true)
 const error = ref<string>()
 const abortCtrl = new AbortController()
@@ -94,7 +79,6 @@ const detail = shallowRef<Announcement | null>(null)
 const confirming = ref(false)
 const confirmTarget = ref<{ id: number; rule: string }>()
 
-const previewVendor = ref('frr')
 const previewPrefix = ref('')
 const previewProtocol = ref<string>('')
 const previewDstPort = ref<string>('')
@@ -105,7 +89,7 @@ const previewResult = shallowRef<PreviewResp | null>(null)
 function fetchAnnouncements() {
   loading.value = true
   request<AnnouncementsResp>('/api/flowspec/announcements', { signal: abortCtrl.signal })
-    .then(r => { announcements.value = r.announcements; vendors.value = r.vendors; error.value = ''; loading.value = false })
+    .then(r => { announcements.value = r.announcements; error.value = ''; loading.value = false })
     .catch(e => { if (!abortCtrl.signal.aborted) { error.value = e instanceof Error ? e.message : String(e); loading.value = false } })
 }
 
@@ -126,7 +110,7 @@ async function executeWithdraw() {
   if (!confirmTarget.value) return
   const { id, rule } = confirmTarget.value
   try {
-    const res = await request<{ ok: true; announcement_id: number; commands?: string[]; output?: string; warning?: string; already_withdrawn?: boolean }>(
+    const res = await request<{ ok: true; announcement_id: number; warning?: string; already_withdrawn?: boolean }>(
       `/api/flowspec/announcements/${id}/withdraw`, { method: 'POST', signal: abortCtrl.signal })
     notify(res.warning ? t('flowspec.forceDone', { rule }) + ': ' + res.warning : t('flowspec.forceDone', { rule }), res.warning ? 'warn' : 'ok')
     confirming.value = false
@@ -140,7 +124,7 @@ async function executeWithdraw() {
 function runPreview() {
   if (!previewPrefix.value.trim()) { notify(t('flowspec.preview.empty'), 'warn'); return }
   const p: PreviewReq = {
-    vendor: previewVendor.value, name: previewPrefix.value, prefix: previewPrefix.value,
+    name: previewPrefix.value, prefix: previewPrefix.value,
     protocol: previewProtocol.value ? Number(previewProtocol.value) : undefined,
     dst_port: previewDstPort.value ? Number(previewDstPort.value) : undefined,
     action: previewAction.value, rate_limit: previewRate.value ? Number(previewRate.value) : undefined
@@ -194,7 +178,6 @@ function matchSummary(rule?: Rule) {
             <th>{{ t('flowspec.col.prefix') }}</th>
             <th>{{ t('flowspec.col.rule') }}</th>
             <th>{{ t('flowspec.col.connector') }}</th>
-            <th>{{ t('flowspec.col.vendor') }}</th>
             <th>{{ t('flowspec.col.match') }}</th>
             <th>{{ t('flowspec.col.holders') }}</th>
             <th>{{ t('flowspec.col.announced') }}</th>
@@ -205,8 +188,7 @@ function matchSummary(rule?: Rule) {
               <td class="mono strong">{{ a.prefix }}</td>
               <td class="mono">{{ a.rule_name }}</td>
               <td>{{ a.connector_name }}</td>
-              <td><XBadge :tone="a.executable ? 'ok' : 'warn'">{{ a.vendor }}</XBadge></td>
-              <td class="mono">{{ matchSummary(a.rule) }}</td>
+              <td class="mono">{{ a.match || matchSummary(a.rule) }}</td>
               <td class="num">{{ a.refcount }}</td>
               <td class="sub">{{ dateTime(a.announced_at).slice(6) }}</td>
               <td><XPill :tone="statusTone(a.status)">{{ t('flowspec.status.' + a.status) || t('flowspec.status.other', { s: a.status }) }}</XPill></td>
@@ -222,10 +204,6 @@ function matchSummary(rule?: Rule) {
       <section class="panel preview-panel">
         <div class="panel-head"><h2>{{ t('flowspec.preview.title') }}</h2></div>
         <div class="preview-form">
-          <div class="field"><label>{{ t('flowspec.preview.vendor') }}</label>
-            <select v-model="previewVendor">
-              <option v-for="v in vendors" :key="v.id" :value="v.id">{{ v.name }} {{ v.executable ? '' : '(' + t('flowspec.exportOnly') + ')' }}</option>
-            </select></div>
           <div class="field"><label>{{ t('flowspec.preview.prefix') }}</label>
             <input v-model="previewPrefix" type="text" placeholder="198.51.100.7/32" /></div>
           <div class="field"><label>{{ t('flowspec.preview.protocol') }}</label>
@@ -242,8 +220,9 @@ function matchSummary(rule?: Rule) {
         </div>
         <div v-if="previewResult" class="preview-result">
           <h3>{{ t('flowspec.preview.result') }}</h3>
-          <pre class="mono">{{ previewResult.commands.join('\n') }}</pre>
-          <XCopy :text="previewResult.commands.join('\n')" />
+          <p class="mono">{{ previewResult.match }}</p>
+          <pre class="mono">{{ JSON.stringify(previewResult.rule, null, 2) }}</pre>
+          <XCopy :text="JSON.stringify(previewResult.rule, null, 2)" />
         </div>
       </section>
     </div>
@@ -255,16 +234,14 @@ function matchSummary(rule?: Rule) {
           <dt>{{ t('flowspec.detail.identity') }}</dt><dd>{{ detail.announcement_id }}</dd>
           <dt>{{ t('flowspec.detail.rule') }}</dt><dd class="mono">{{ detail.rule?.Name || detail.rule_name }}</dd>
           <dt>{{ t('flowspec.detail.prefix') }}</dt><dd class="mono">{{ detail.prefix }}</dd>
-          <dt>{{ t('flowspec.detail.vendor') }}</dt><dd><XBadge :tone="detail.executable ? 'ok' : 'warn'">{{ detail.vendor }}</XBadge></dd>
           <dt>{{ t('flowspec.detail.status') }}</dt><dd><XPill :tone="statusTone(detail.status)">{{ t('flowspec.status.' + detail.status) || detail.status }}</XPill></dd>
           <dt>{{ t('flowspec.detail.refcount') }}</dt><dd>{{ detail.refcount }}</dd>
         </dl>
-        <div class="subh">{{ t('flowspec.detail.commands') }}</div>
-        <pre class="mono cmd">{{ detail.commands?.join('\n') || t('flowspec.preview.empty') }}</pre>
-        <XCopy :text="detail.commands?.join('\n') || ''" />
-        <div class="subh">{{ t('flowspec.detail.withdrawCommands') }}</div>
-        <pre class="mono cmd">{{ detail.withdraw_commands?.join('\n') || t('flowspec.preview.empty') }}</pre>
-        <XCopy :text="detail.withdraw_commands?.join('\n') || ''" />
+        <div class="subh">{{ t('flowspec.detail.match') }}</div>
+        <pre class="mono cmd">{{ detail.match || detail.rule_name }}</pre>
+        <div class="subh">{{ t('flowspec.detail.ruleJson') }}</div>
+        <pre class="mono cmd">{{ JSON.stringify(detail.rule, null, 2) }}</pre>
+        <XCopy :text="JSON.stringify(detail.rule, null, 2)" />
         <div class="subh">{{ t('flowspec.detail.attacks') }}</div>
         <ul v-if="detail.attacks?.length" class="attacks-list">
           <li v-for="atk in detail.attacks" :key="atk.attack_id">

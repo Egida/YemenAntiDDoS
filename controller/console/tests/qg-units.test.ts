@@ -7,8 +7,8 @@ import { root } from '../scripts/lib.mjs'
 import { sourceText } from './r1-files.mjs'
 import zh from '../src/i18n/ar'
 import en from '../src/i18n/en'
-const base: Form = { name: '  Edge  ', bgp_asn: 65001, vtysh_path: ' /usr/bin/vtysh ', description: ' memo ',
-  vendor: 'arista', flowspec_enabled: true,
+const base: Form = { name: '  Edge  ', bgp_asn: 65001, neighbor_ip: ' 192.0.2.1 ', neighbor_asn: 65002, md5_password: ' secret ', description: ' memo ',
+  vendor: '', flowspec_enabled: true,
   api_url: ' https://xdrop.example.com/api/v1// ', api_key: ' key1234 ', url: ' https://hooks.example.net/notify ',
   method: 'PATCH', headers: '', timeout_ms: 1500, global: true, command: ' /bin/true ',
   default_args: ' --ip {dst_ip} ', enabled: false }
@@ -16,11 +16,12 @@ const row = { id: 2, name: 'Old', enabled: false, created_at: 'a', updated_at: '
   api_url: 'https://xdrop.example.com/api/v1', api_key: '***1234', timeout_ms: 500,
   headers: { Authorization: '******' }, url: 'https://hooks.example.net/notify', method: 'PUT', global: true,
   command: '/bin/true', default_args: '--ip {dst_ip}', pass_stdin: true,
-  bgp_asn: 4294967295, vtysh_path: '/mock/missing', description: ' old ',
-  vendor: 'juniper', flowspec_enabled: true }
+  bgp_asn: 4294967295, neighbor_ip: '198.51.100.1', neighbor_asn: 65010, description: ' old ',
+  vendor: '', flowspec_enabled: true, address_family: 'auto' }
 const expected: Record<Kind, Record<string, unknown>> = {
-  bgp: { name: 'Edge', bgp_asn: 65001, vtysh_path: '/usr/bin/vtysh', description: ' memo ',
-    vendor: 'arista', flowspec_enabled: true, enabled: false },
+  bgp: { name: 'Edge', bgp_asn: 65001, description: ' memo ', vendor: '',
+    flowspec_enabled: true, address_family: 'auto',
+    neighbor_ip: '192.0.2.1', neighbor_asn: 65002, md5_password: 'secret', enabled: false },
   xdrop: { name: 'Edge', api_url: 'https://xdrop.example.com/api/v1', api_key: 'key1234', timeout_ms: 1500 },
   webhook: { name: 'Edge', url: 'https://hooks.example.net/notify', method: 'PATCH', headers: {},
     timeout_ms: 1500, global: true },
@@ -30,7 +31,7 @@ it.each(['bgp', 'xdrop', 'webhook', 'shell'] as const)('G-units %s create/edit e
   expect(connectorBody(kind, base)).toEqual(expected[kind])
   expect(connectorBody(kind, base, row)).toEqual({ ...expected[kind], enabled: false })
   expect(connectorBody(kind, base, row)).not.toHaveProperty('pass_stdin')
-  expect(connectorBody(kind, base, row)).not.toHaveProperty('address_family')
+  if (kind !== 'bgp') expect(connectorBody(kind, base, row)).not.toHaveProperty('address_family')
 })
 it('G-units XDrop empty edit key omitted, mask never copied, URL normalized W1 W2', () => {
   const form = { ...base, api_key: '  ' }
@@ -49,13 +50,12 @@ it('G-units Webhook empty object and unchanged masked edit payload W5 W6', () =>
       headers: { Authorization: '******', 'X-ID': 'abc' }, timeout_ms: 1500, global: true, enabled: false })
 })
 it.each([
-  ['bgp', { name: ' ', vtysh_path: '' }, 'nameRequired', 'الرجاء إدخال اسم'],
+  ['bgp', { name: ' ', neighbor_ip: '', neighbor_asn: 0 }, 'nameRequired', 'الرجاء إدخال اسم'],
   ['shell', { name: ' ', command: '' }, 'shellNameRequired', 'الاسم مطلوب'],
   ['webhook', { name: ' ', url: '' }, 'nameRequired', 'الرجاء إدخال اسم'],
   ['xdrop', { name: ' ', api_url: '', api_key: '' }, 'nameRequired', 'الرجاء إدخال اسم'],
-  ['bgp', { vtysh_path: ' ', vendor: 'frr' }, 'vtyshRequired', 'الرجاء إدخال مسار vtysh'],
-  ['bgp', { vendor: 'cisco_xr', flowspec_enabled: false }, 'vendorNeedsFlowspec',
-    '{vendor} للتصدير فقط: مكّن BGP Flowspec لهذا الموصّل.'],
+  ['bgp', { enabled: true, neighbor_ip: ' ', neighbor_asn: 0 }, 'neighborRequired', 'يتطلّب الموصّل المفعّل عنوان IP ورقم ASN للمجاور'],
+  ['bgp', { enabled: true, neighbor_ip: '192.0.2.1', neighbor_asn: 0 }, 'neighborRequired', 'يتطلّب الموصّل المفعّل عنوان IP ورقم ASN للمجاور'],
   ['xdrop', { api_url: ' /// ', api_key: '' }, 'apiUrlRequired', 'الرجاء إدخال عنوان API'],
   ['xdrop', { api_key: ' ' }, 'apiKeyRequired', 'الرجاء إدخال مفتاح API'],
   ['webhook', { url: ' ', headers: '[' }, 'urlRequired', 'الرجاء إدخال رابط'],
@@ -88,15 +88,15 @@ it('G-units edit checks URL then mask own keys W2 W7', () => {
   expect(connectorCheck('shell', { ...base, default_args: '{unknown}' })).toBeUndefined()
 })
 it.each(['bgp', 'xdrop', 'webhook', 'shell'] as const)('G-units %s all default fields and refill', kind => {
-  expect(fillForm(kind)).toEqual({ name: '', bgp_asn: 65000, vtysh_path: '/usr/bin/vtysh', description: '',
-    vendor: 'frr', flowspec_enabled: false,
+  expect(fillForm(kind)).toEqual({ name: '', bgp_asn: 65000, neighbor_ip: '', neighbor_asn: 0, md5_password: '', description: '',
+    vendor: '', flowspec_enabled: false,
     api_url: '', api_key: '', url: '', method: 'POST', headers: '', timeout_ms: kind === 'shell' ? 30000 : 10000,
     global: false, command: '', default_args: '', enabled: true })
   const form = fillForm(kind, row)
   expect(form.name).toBe('Old')
   expect(form.enabled).toBe(false)
-  if (kind === 'bgp') expect([form.bgp_asn, form.vtysh_path, form.description, form.vendor, form.flowspec_enabled])
-    .toEqual([4294967295, '/mock/missing', ' old ', 'juniper', true])
+  if (kind === 'bgp') expect([form.bgp_asn, form.neighbor_ip, form.neighbor_asn, form.md5_password, form.description, form.vendor, form.flowspec_enabled])
+    .toEqual([4294967295, '198.51.100.1', 65010, '', ' old ', '', true])
   if (kind === 'webhook') expect([form.url, form.method, form.headers, form.global])
     .toEqual(['https://hooks.example.net/notify', 'PUT', '{\n  "Authorization": "******"\n}', true])
   if (kind === 'shell') expect([form.command, form.default_args]).toEqual(['/bin/true', '--ip {dst_ip}'])
@@ -112,7 +112,7 @@ it.each(['xdrop', 'webhook', 'shell'] as const)('G-units %s timeout zero/high/no
 it.each([
   ['connector in use by 2 action(s)', 'inUseActions'],
   ['xDrop connector still has active rules', 'inUseRules'],
-  ['connector still has 2 announcements in FRR-relevant states', 'inUseRules'],
+  ['connector still has 2 active announcements', 'inUseRules'],
   ['already exists', ''],
 ])('G-units 409 classification %s W16', (raw, key) => expect(deletionHint(raw)).toBe(key))
 it('G-units test response shapes W14', () => {
@@ -127,8 +127,8 @@ it('G-units test response shapes W14', () => {
     key: 'xdropTestFailed', args: { name: '' }, detail: 'invalid auth' })
   expect(testResult('bgp', { ok: true, output: 'BGP output' })).toEqual({ ok: true,
     key: 'connectionOk', detail: 'BGP output' })
-  expect(testResult('bgp', { ok: false, error: 'vtysh error' })).toEqual({ ok: false,
-    key: 'bgpTestFailed', detail: 'vtysh error' })
+  expect(testResult('bgp', { ok: false, error: 'speaker error' })).toEqual({ ok: false,
+    key: 'bgpTestFailed', detail: 'speaker error' })
 })
 it.each(['bgp', 'webhook', 'xdrop'] as const)('G-units %s request failures retain original', kind => {
   for (const error of ['Forbidden', 'not found', 'network failed', 'timeout']) {

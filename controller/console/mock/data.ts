@@ -480,7 +480,7 @@ function qdSession(mode: string, now: number, state: State) {
       }, 400)
       if (operation === 'dismiss') announcements.set(id, 'dismissed')
       if (operation === 'undismiss') announcements.set(id, 'orphan')
-      return send(mode === 'qd-warning' ? { ok: true, warning: 'vtysh error: mock (row marked failed)' }
+      return send(mode === 'qd-warning' ? { ok: true, warning: 'speaker error: mock (row marked failed)' }
         : { ok: true, announcement_id: body.announcement_id })
     }
     if (method === 'POST' && path === '/api/nodes') {
@@ -563,8 +563,8 @@ export function fixtureState(now: number) {
     shell: [1, 2].map(id => ({ ...connector(id, id === 1 ? 'Local shell' : 'Disabled shell', id === 1),
       command: '/bin/true', default_args: '', timeout_ms: 10000, pass_stdin: id === 2 })),
     bgp: [1, 2].map(id => ({ ...connector(id, id === 1 ? 'Edge BGP' : 'Disabled BGP', id === 1),
-      bgp_asn: 64512, vtysh_path: '/mock/missing', address_family: 'ipv4', description: '',
-      vendor: '', flowspec_enabled: false })),
+      bgp_asn: 64512, neighbor_ip: id === 1 ? '192.0.2.1' : '192.0.2.2', neighbor_asn: 65001,
+      address_family: 'auto', description: '', vendor: '', flowspec_enabled: false })),
     xdrop: [
     { id: 1, name: 'Edge XDrop', enabled: true, api_url: 'http://mock-xdrop.invalid', api_key: '***abcd',
       timeout_ms: 10000, created_at, updated_at: new Date(now - 5000).toISOString() },
@@ -1193,11 +1193,11 @@ export function connectorSession(mode: string, now: number, s = fixtureState(now
     if (operation) {
       if (!old) return fail(kind + ' connector not found', 404)
       if (operation === 'routes' && kind === 'bgp' && method === 'GET') return mode === 'qg-test-fail'
-        ? fail('vtysh failed: ipv4=mock unavailable ipv6=mock unavailable', 502)
+        ? fail('speaker error: mock unavailable', 502)
         : send({ output: 'BGP table version 1\n*> 192.0.2.0/24  0.0.0.0  0  i' })
       if (operation !== 'test' || method !== 'POST' || kind === 'shell') return fail('not found', 404)
-      if (kind === 'bgp') return mode === 'qg-test-fail' ? fail('vtysh failed: mock unavailable', 502)
-        : send({ ok: true, output: 'IPv4 Unicast Summary\nRouter identifier 192.0.2.1, local AS 64512' })
+      if (kind === 'bgp') return mode === 'qg-test-fail' ? fail('speaker error: mock unavailable', 502)
+        : send({ ok: true, output: 'Neighbor 192.0.2.1, remote AS 65001, state Established' })
       if (kind === 'xdrop') return mode === 'qg-test-fail'
         ? send({ success: false, error: 'health check failed: mock unavailable' })
         : send({ success: true, status_code: 200, kind: 'machine', name: 'qg-fixture' })
@@ -1214,7 +1214,7 @@ export function connectorSession(mode: string, now: number, s = fixtureState(now
         + `connector in use by ${count} action(s)`, 409)
       const live = kind === 'bgp' && id === 1 ? [...s.announcements.values()].filter(status =>
         ['announcing', 'active', 'delayed', 'withdrawing', 'failed', 'orphan'].includes(status)).length : 0
-      if (live) return fail(`connector still has ${live} announcements in FRR-relevant states`, 409)
+      if (live) return fail(`connector still has ${live} active announcements`, 409)
       s.connectors[kind] = rows.filter(c => c.id !== id)
       return send({ ok: true })
     }
@@ -1223,13 +1223,13 @@ export function connectorSession(mode: string, now: number, s = fixtureState(now
     if (!create && !old) return fail(kind + ' connector not found', 404)
     let next: any = create ? { name: '', enabled: true } : { ...old }
     const fields: Record<string, string[]> = {
-      bgp: ['name', 'bgp_asn', 'vtysh_path', 'description', 'vendor', 'flowspec_enabled', 'enabled'],
+      bgp: ['name', 'bgp_asn', 'neighbor_ip', 'neighbor_asn', 'md5_password', 'description', 'vendor', 'flowspec_enabled', 'address_family', 'enabled'],
       xdrop: ['name', 'api_url', 'timeout_ms', 'enabled'],
       webhook: ['name', 'url', 'method', 'headers', 'timeout_ms', 'global', 'enabled'],
       shell: ['name', 'command', 'default_args', 'timeout_ms', 'enabled'],
     }
     for (const field of fields[kind]!) if (Object.hasOwn(body, field)) {
-      if (kind === 'bgp' && !create && ['name', 'vtysh_path'].includes(field) && !body[field]) continue
+      if (kind === 'bgp' && !create && field === 'name' && !body[field]) continue
       next[field] = body[field]
     }
     if (!next.name) return fail('name is required')
@@ -1238,18 +1238,24 @@ export function connectorSession(mode: string, now: number, s = fixtureState(now
       if (next.bgp_asn < 1 || next.bgp_asn > 4294967295) {
         return fail(`bgp_asn must be between 1 and 4294967295, got ${next.bgp_asn}`)
       }
-      next.vtysh_path ||= '/usr/bin/vtysh'
       next.address_family ??= 'auto'
       next.description ??= ''
-      const aliases: Record<string, string> = { '': 'frr', frr: 'frr', cisco: 'cisco_xr', cisco_xr: 'cisco_xr',
-        ios_xr: 'cisco_xr', juniper: 'juniper', junos: 'juniper', arista: 'arista', eos: 'arista' }
-      const vendor = aliases[String(next.vendor ?? '').toLowerCase().trim()]
-      if (!vendor) return fail(`flowspec: unsupported vendor "${next.vendor}" (want frr, cisco_xr, juniper, arista)`)
-      next.vendor = vendor
+      next.vendor = String(next.vendor ?? '')
       next.flowspec_enabled ??= false
-      if (vendor !== 'frr' && !next.flowspec_enabled) {
-        return fail(`vendor "${vendor}" is export-only: set flowspec_enabled=true `
-          + '(RTBH cannot be applied to a non-FRR speaker)')
+      next.neighbor_ip = String(next.neighbor_ip ?? '').trim()
+      next.neighbor_asn = next.neighbor_asn == null ? 0 : Number(next.neighbor_asn)
+      if (next.enabled && (!next.neighbor_ip || !next.neighbor_asn)) {
+        return fail('neighbor_ip and neighbor_asn are required when enabled')
+      }
+      if (next.neighbor_asn && (next.neighbor_asn < 1 || next.neighbor_asn > 4294967295)) {
+        return fail(`neighbor_asn must be between 1 and 4294967295, got ${next.neighbor_asn}`)
+      }
+      if (!create && (!Object.hasOwn(body, 'md5_password') || !String(body.md5_password ?? '').trim())) {
+        delete next.md5_password
+      } else if (Object.hasOwn(body, 'md5_password')) {
+        const md5 = String(body.md5_password ?? '').trim()
+        if (md5) next.md5_password = md5
+        else delete next.md5_password
       }
     }
     if (kind === 'xdrop') {

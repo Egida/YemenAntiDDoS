@@ -12,8 +12,6 @@ import XSwitch from '../../components/XSwitch.vue'
 import XTip from '../../components/XTip.vue'
 import { attributes, operators, exampleKey, matching, saveAction, validate } from './data'
 import type { Form, Connector, Phase, Send } from './data'
-import { vendorName } from '../connectors/data'
-import type { Vendor } from '../connectors/data'
 const props = defineProps<{
   modelValue: boolean; form: Form; phase: Phase; responseID: number
   connectors: Record<string, Connector[]>; viewing?: boolean
@@ -32,9 +30,9 @@ const types = computed(() => options(props.phase === 'on_expired'
 function connectorLabel(c: Connector) {
   const base = c.name + (c.enabled === false ? t('responses.disabledConnector') : '')
   if (props.form.action_type !== 'bgp') return base
-  const vendor = c.vendor && c.vendor !== 'frr' ? vendorName[c.vendor as Vendor] ?? c.vendor : ''
+  const neighbor = (c as { neighbor_ip?: string }).neighbor_ip
   const mode = c.flowspec_enabled ? t('connectors.flowspec') : ''
-  const tags = [vendor, mode].filter(Boolean)
+  const tags = [neighbor, mode].filter(Boolean)
   return tags.length ? `${base} · ${tags.join(' · ')}` : base
 }
 const connectorOptions = computed(() => [{ value: '', label: t('responses.selectConnector') },

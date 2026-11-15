@@ -5,11 +5,6 @@ export const kinds = ['bgp', 'xdrop', 'webhook', 'shell'] as const
 export type Kind = typeof kinds[number]
 export type TestKind = Exclude<Kind, 'shell'>
 export const kindName: Record<Kind, string> = { bgp: 'BGP', xdrop: 'XDrop', webhook: 'Webhook', shell: 'Shell' }
-export const vendors = ['frr', 'cisco_xr', 'juniper', 'arista'] as const
-export type Vendor = typeof vendors[number]
-export const vendorName: Record<Vendor, string> = {
-  frr: 'FRR', cisco_xr: 'Cisco IOS XR', juniper: 'Juniper Junos', arista: 'Arista EOS',
-}
 interface CommonRow {
   id: number
   name: string
@@ -19,11 +14,13 @@ interface CommonRow {
 }
 export interface BGPRow extends CommonRow {
   bgp_asn: number
-  vtysh_path: string
   description: string
   address_family: string
   vendor: string
   flowspec_enabled: boolean
+  neighbor_ip: string
+  neighbor_asn: number
+  md5_password?: string
 }
 export interface XDropRow extends CommonRow {
   api_url: string
@@ -48,7 +45,9 @@ export interface LegacyRow { id: number; url: string; events: string[]; enabled:
 export interface Form {
   name: string
   bgp_asn: number
-  vtysh_path: string
+  neighbor_ip: string
+  neighbor_asn: number
+  md5_password: string
   description: string
   vendor: string
   flowspec_enabled: boolean
@@ -70,8 +69,8 @@ const objectHeaders = (value: unknown): value is Record<string, string> => !!val
   && Object.values(value).every(v => typeof v === 'string')
 export function fillForm(kind: Kind, row?: ConnectorRow): Form {
   const form: Form = {
-    name: '', bgp_asn: 65000, vtysh_path: '/usr/bin/vtysh', description: '',
-    vendor: 'frr', flowspec_enabled: false, api_url: '', api_key: '',
+    name: '', bgp_asn: 65000, neighbor_ip: '', neighbor_asn: 0, md5_password: '', description: '',
+    vendor: '', flowspec_enabled: false, api_url: '', api_key: '',
     url: '', method: methods[0], headers: '', timeout_ms: kind === 'shell' ? 30000 : 10000,
     global: false, command: '', default_args: '', enabled: true,
   }
@@ -81,9 +80,11 @@ export function fillForm(kind: Kind, row?: ConnectorRow): Form {
   if (kind === 'bgp') {
     const bgp = row as BGPRow
     form.bgp_asn = bgp.bgp_asn
-    form.vtysh_path = bgp.vtysh_path
+    form.neighbor_ip = bgp.neighbor_ip || ''
+    form.neighbor_asn = bgp.neighbor_asn || 0
+    form.md5_password = ''
     form.description = bgp.description
-    form.vendor = bgp.vendor || 'frr'
+    form.vendor = bgp.vendor || ''
     form.flowspec_enabled = bgp.flowspec_enabled === true
   } else {
     const timed = row as XDropRow | WebhookRow | ShellRow
@@ -107,9 +108,8 @@ export interface Message { key: string; args?: Record<string, string | number> }
 export function connectorCheck(kind: Kind, form: Form, row?: ConnectorRow): Message | undefined {
   const error = (key: string, args?: Message['args']) => ({ key, args })
   if (!form.name.trim()) return error(kind === 'shell' ? 'shellNameRequired' : 'nameRequired')
-  if (kind === 'bgp' && form.vendor === 'frr' && !form.vtysh_path.trim()) return error('vtyshRequired')
-  if (kind === 'bgp' && form.vendor !== 'frr' && !form.flowspec_enabled) {
-    return error('vendorNeedsFlowspec', { vendor: vendorName[form.vendor as Vendor] ?? form.vendor })
+  if (kind === 'bgp' && form.enabled && (!form.neighbor_ip.trim() || !form.neighbor_asn)) {
+    return error('neighborRequired')
   }
   if (kind === 'xdrop') {
     if (!normalizeURL(form.api_url)) return error('apiUrlRequired')
@@ -138,8 +138,10 @@ export function connectorCheck(kind: Kind, form: Form, row?: ConnectorRow): Mess
 export function connectorBody(kind: Kind, form: Form, row?: ConnectorRow): Record<string, unknown> {
   const name = form.name.trim()
   if (kind === 'bgp') return {
-    name, bgp_asn: form.bgp_asn, vtysh_path: form.vtysh_path.trim(),
-    description: form.description, vendor: form.vendor, flowspec_enabled: form.flowspec_enabled,
+    name, bgp_asn: form.bgp_asn, description: form.description, vendor: form.vendor,
+    flowspec_enabled: form.flowspec_enabled, address_family: 'auto',
+    neighbor_ip: (form.neighbor_ip ?? '').trim(), neighbor_asn: form.neighbor_asn || undefined,
+    ...((form.md5_password ?? '').trim() ? { md5_password: form.md5_password.trim() } : {}),
     enabled: form.enabled,
   }
   const edit = row ? { enabled: form.enabled } : {}

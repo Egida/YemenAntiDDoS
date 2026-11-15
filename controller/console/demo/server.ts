@@ -356,7 +356,7 @@ export function createServer(data: Dataset = createData()): Server {
       || r.entity_type === q.get('entity_type')) && (!q.has('user_id') || r.user_id === number('user_id', 0))
       && (!q.has('from') || Date.parse(r.created_at) >= Date.parse(q.get('from')!))
       && (!q.has('to') || Date.parse(r.created_at) <= Date.parse(q.get('to')!)))))
-    if (path === '/api/flowspec/announcements') return send({ announcements: [], vendors: [{ id: 'frr', name: 'FRR (local)', executable: true }] })
+    if (path === '/api/flowspec/announcements') return send({ announcements: [] })
     if (path === '/api/l7/summary') return send({ generated_at: new Date().toISOString(), window_minutes: 5, bucket_seconds: 60,
       totals: { 'l7_http_flood': 0, 'l7_tls_clienthello': 0, 'l7_slowloris': 0 }, rates: {}, series: [], targets: [],
       sources: [], nodes: [], recent: [], dropped: 0 })
