@@ -357,6 +357,10 @@ export function createServer(data: Dataset = createData()): Server {
       && (!q.has('from') || Date.parse(r.created_at) >= Date.parse(q.get('from')!))
       && (!q.has('to') || Date.parse(r.created_at) <= Date.parse(q.get('to')!)))))
     if (path === '/api/flowspec/announcements') return send({ announcements: [] })
+    if (path === '/api/settings/bgp-instance') return send({ configured: true,
+      instance: { local_asn: 65000, router_id: '192.0.2.10', listen_port: 179, rtbh_next_hop: '203.0.113.1' },
+      speaker_running: true })
+    if (path === '/api/bgp/peers') return send({ peers: [], speaker_running: true })
     if (path === '/api/l7/summary') return send({ generated_at: new Date().toISOString(), window_minutes: 5, bucket_seconds: 60,
       totals: { 'l7_http_flood': 0, 'l7_tls_clienthello': 0, 'l7_slowloris': 0 }, rates: {}, series: [], targets: [],
       sources: [], nodes: [], recent: [], dropped: 0 })
