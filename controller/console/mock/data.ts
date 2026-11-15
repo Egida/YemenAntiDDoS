@@ -564,7 +564,7 @@ export function fixtureState(now: number) {
       command: '/bin/true', default_args: '', timeout_ms: 10000, pass_stdin: id === 2 })),
     bgp: [1, 2].map(id => ({ ...connector(id, id === 1 ? 'Edge BGP' : 'Disabled BGP', id === 1),
       bgp_asn: 64512, neighbor_ip: id === 1 ? '192.0.2.1' : '192.0.2.2', neighbor_asn: 65001,
-      address_family: 'auto', description: '', vendor: '', flowspec_enabled: false })),
+      address_family: 'ipv4', description: '', vendor: '', flowspec_enabled: false })),
     xdrop: [
     { id: 1, name: 'Edge XDrop', enabled: true, api_url: 'http://mock-xdrop.invalid', api_key: '***abcd',
       timeout_ms: 10000, created_at, updated_at: new Date(now - 5000).toISOString() },
@@ -1214,7 +1214,7 @@ export function connectorSession(mode: string, now: number, s = fixtureState(now
         + `connector in use by ${count} action(s)`, 409)
       const live = kind === 'bgp' && id === 1 ? [...s.announcements.values()].filter(status =>
         ['announcing', 'active', 'delayed', 'withdrawing', 'failed', 'orphan'].includes(status)).length : 0
-      if (live) return fail(`connector still has ${live} active announcements`, 409)
+      if (live) return fail(`connector still has ${live} announcements in flight`, 409)
       s.connectors[kind] = rows.filter(c => c.id !== id)
       return send({ ok: true })
     }

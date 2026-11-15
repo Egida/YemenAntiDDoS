@@ -430,9 +430,12 @@
       "body": {
         "name": "qg BGP",
         "bgp_asn": 65000,
-        "vtysh_path": "/mock/missing",
         "description": "memo",
-        "enabled": false
+        "enabled": false,
+        "address_family": "auto",
+        "neighbor_ip": "",
+        "vendor": "",
+        "flowspec_enabled": false
       },
       "reads": [
         "/api/settings/bgp-connectors"
@@ -442,10 +445,14 @@
         "form": {
           "name": "qg BGP",
           "bgp_asn": 65000,
-          "vtysh_path": "/mock/missing",
           "description": "memo",
           "enabled": false,
-          "kind": "bgp"
+          "kind": "bgp",
+          "neighbor_ip": "",
+          "neighbor_asn": 0,
+          "md5_password": "",
+          "vendor": "",
+          "flowspec_enabled": false
         }
       }
     },
@@ -458,9 +465,12 @@
       "body": {
         "name": "qg BGP",
         "bgp_asn": 65000,
-        "vtysh_path": "/mock/missing",
         "description": "memo",
-        "enabled": false
+        "enabled": false,
+        "address_family": "auto",
+        "neighbor_ip": "",
+        "vendor": "",
+        "flowspec_enabled": false
       },
       "reads": [
         "/api/settings/bgp-connectors"
@@ -470,10 +480,14 @@
         "form": {
           "name": "qg BGP",
           "bgp_asn": 65000,
-          "vtysh_path": "/mock/missing",
           "description": "memo",
           "enabled": false,
-          "kind": "bgp"
+          "kind": "bgp",
+          "neighbor_ip": "",
+          "neighbor_asn": 0,
+          "md5_password": "",
+          "vendor": "",
+          "flowspec_enabled": false
         }
       }
     },
@@ -486,9 +500,12 @@
       "body": {
         "name": "qg BGP next",
         "bgp_asn": 65000,
-        "vtysh_path": "/mock/missing",
         "description": "memo",
-        "enabled": false
+        "enabled": false,
+        "address_family": "auto",
+        "neighbor_ip": "",
+        "vendor": "",
+        "flowspec_enabled": false
       },
       "reads": [
         "/api/settings/bgp-connectors"
@@ -498,10 +515,14 @@
         "form": {
           "name": "qg BGP next",
           "bgp_asn": 65000,
-          "vtysh_path": "/mock/missing",
           "description": "memo",
           "enabled": false,
-          "kind": "bgp"
+          "kind": "bgp",
+          "neighbor_ip": "",
+          "neighbor_asn": 0,
+          "md5_password": "",
+          "vendor": "",
+          "flowspec_enabled": false
         }
       }
     },
@@ -1035,8 +1056,11 @@
       "body": {
         "name": "qg BGP",
         "bgp_asn": 65000,
-        "vtysh_path": "/mock/missing",
         "description": "",
+        "vendor": "",
+        "flowspec_enabled": false,
+        "address_family": "auto",
+        "neighbor_ip": "",
         "enabled": false
       },
       "reads": [
@@ -1047,14 +1071,18 @@
         "form": {
           "name": "qg BGP",
           "bgp_asn": 65000,
-          "vtysh_path": "/mock/missing",
           "description": "",
           "enabled": false,
           "kind": "bgp",
           "row": {
             "id": 3,
             "description": "memo"
-          }
+          },
+          "neighbor_ip": "",
+          "neighbor_asn": 0,
+          "md5_password": "",
+          "vendor": "",
+          "flowspec_enabled": false
         }
       }
     },
