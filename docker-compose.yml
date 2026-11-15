@@ -55,6 +55,11 @@ services:
     ports:
       - "8080:8080"      # Web UI + REST API + /metrics
       - "50051:50051"    # Node gRPC — enable tls.enabled=true (mTLS) for production
+      - "179:179"        # BGP — embedded speaker listener (cap NET_BIND_SERVICE below)
+    cap_add:
+      - NET_BIND_SERVICE
+    # Active-connect-only deployments (peers never dial us) can drop the port mapping
+    # and the capability, and set listen_port: 0 in the BGP instance.
     restart: unless-stopped
 
   # Optional XDP/flow Node. Uses host networking so the mirror/ERSPAN

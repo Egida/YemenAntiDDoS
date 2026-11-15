@@ -108,22 +108,9 @@ retention:
   interval_hours: 24         # cleanup runs once per day
 
 # ============================================================
-# BGP Flowspec / RTBH — configured in the Web Console, not here
-# ============================================================
-# BGP connectors live in the database (Console > Settings > BGP Connectors) and
-# are pushed to nodes/actions at runtime. Per-connector fields:
-#
-#   vendor           : frr (default) | cisco_xr | juniper | arista
-#                      (aliases accepted: cisco, ios_xr -> cisco_xr; junos -> juniper;
-#                       eos -> arista; empty -> frr)
-#   flowspec_enabled : true  -> attacks on this connector announce BGP Flowspec rules
-#                      (kind='flowspec', rule stored as JSON rule_spec)
-#                      false -> classic RTBH blackhole announcements
-#   bgp_asn          : local AS number (required)
-#   vtysh_path       : FRR vtysh binary used for local apply (frr vendor only)
-#   address_family   : ipv4 | ipv6
-#
-# FRR connectors apply/withdraw rules through vtysh; Cisco XR, Juniper and Arista
-# connectors are export-only — the Console renders vendor-specific install and
-# withdraw commands in the Mitigations > Flowspec drawer for manual application.
+# BGP (embedded GoBGP speaker) — instance identity is configured in the Web
+# Console (Settings → BGP Instance): local_asn, router_id, listen_port,
+# rtbh_next_hop. Neighbors are configured per connector (Settings → BGP
+# Connectors): neighbor_ip, neighbor_asn, md5_password. Nothing BGP-related
+# lives in this YAML anymore.
 # See docs/FLOWSPEC.md (EN) / docs/FLOWSPEC.ar.md (AR).
