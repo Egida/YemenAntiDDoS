@@ -22,7 +22,7 @@
 | 1 | أمن النقل | gRPC نصّي، والهوية من `node_id` داخل الرسالة | mTLS كامل + هوية من الشهادة (URI SAN) |
 | 2 | التخفيف الذاتي | نافذة تأكيد 3–5 ثوانٍ، عتبة عينات صلبة 1000 | مسار سريع (fast-path) + عتبة عينات تكيفية |
 | 3 | رؤية L7 | مفكّكات L3/L4 فقط | HTTP flood، Slowloris، شذوذ TLS handshake |
-| 4 | توجيه الشبكة | BGP RTBH فقط (حجب البادئة كاملة) | BGP Flowspec + أتمتة Cisco/Juniper/Arista |
+| 4 | توجيه الشبكة | BGP RTBH فقط (حجب البادئة كاملة) | متحدّث GoBGP مدمج (Flowspec/RTBH) بلا FRR محلي |
 | 5 | الموثوقية والأداء | لا اختبار حمل، لا خط أساس 10Gbps | harness لاختبار الضغط + استرجاع الحالة |
 
 ### حالة التنفيذ في هذا المستودع
@@ -33,7 +33,7 @@
 | Fast-path للتأكيد | ✅ منفّذ ومُختبَر | `controller/internal/tracker/tracker.go`، `fastpath_test.go` |
 | عتبة عينات تكيفية | ✅ منفّذة (اختيارية) | `controller/internal/action/xdrop_shape.go`، `xdrop_adaptive_test.go` |
 | تحليل L7 (HTTP/Slowloris/TLS) | ✅ منفّذ ومُختبَر (Node + Controller + Console) | `shared/l7/`، `node/internal/l7collector/`، `controller/internal/l7store/`، `docs/L7.md` |
-| مُولّد أوامر BGP Flowspec | ✅ مُختبَر (FRR + قوالب موردين) | `controller/internal/action/flowspec/` |
+| متحدّث BGP مدمج (Flowspec/RTBH) | ✅ منفّذ (GoBGP؛ بلا FRR/vtysh محلي) | `controller/internal/bgp/`، `controller/internal/api/bgp_instance.go`، `docs/FLOWSPEC.md` |
 | اختبار الضغط وسيناريوهات الفوضى | ✅ أدوات ووثائق | `scripts/stress-10g.sh`، `docs/CHAOS-TESTS.md` |
 
 ---
@@ -57,7 +57,7 @@
                     │                    │ Engine      │            │
                     │                    └──┬───┬───┬──┘            │
                     │         xDrop v3 ◄────┘   │   └────► BGP/Flowspec
-                    │        (rate_limit)       │          (FRR vtysh)
+                    │        (rate_limit)       │       (GoBGP speaker)
                     │                       webhook/shell          │
                     └──────────────────────────────────────────────┘
 ```
@@ -217,36 +217,21 @@ const (
 
 ## 6. العمود الرابع: تنسيق الشبكة وBGP Flowspec
 
-### 6.1 Flowspec
+### 6.1 متحدّث GoBGP المدمج
 
-إضافة نوع موصّل `bgp_flowspec` يستخدم FRR عبر `vtysh`:
+يُضمّن المتحكّم متحدّث [GoBGP](https://github.com/osrg/gobgp) (`controller/internal/bgp/`) ويُنشئ مسارات Flowspec ‏(RFC 8955، إسقاط أو تحديد معدّل لكل تدفّق) وRTBH ‏(RFC 7999) عبر جلسات BGP حقيقية، بلا FRR محلي وبلا توليد لأوامر CLI خاصة بالمورّدين. كل جار مُعدّ وفي حالة `established` يستقبل نفس الإعلانات النشطة.
 
-```
-configure terminal
-flowspec
-  flow spec ipv4 1 permit
-    match destination 198.51.100.7/32
-    match protocol tcp
-    match destination-port 443
-    then actions rate-limit 1000000
-```
+- **هوية المثيل** (`bgp_instance`، الإعدادات → مثيل BGP): `local_asn`، `router_id`، `listen_port`، `rtbh_next_hop`.
+- **الجيران** (موصّلات BGP، الإعدادات → موصّلات BGP): `neighbor_ip`، `neighbor_asn`، `md5_password` (اختياري)، `address_family`، `flowspec_enabled`.
+- تُخزَّن الإعلانات في `bgp_announcements` مع `kind`/`rule_spec` (قاعدة flowspec بصيغة JSON) وتُعدّ مرجعيًا؛ عند إعادة التشغيل يُعاد بناء جدول RIB (في الذاكرة) من قاعدة البيانات.
 
-- يدعم `drop` و`rate-limit` بدقة أعلى من RTBH (لا يحجب البادئة كاملة).
-- يُخزَّن في جدول `bgp_announcements` بحقل `kind` (`rtbh|flowspec`).
-- استرجاع آمن: نفس منطق `startup_cleanup` مع `splitExternalRuleID` وتوسيعه لـ Flowspec.
+التفاصيل التشغيلية في [docs/FLOWSPEC.md](FLOWSPEC.md) (AR: [docs/FLOWSPEC.ar.md](FLOWSPEC.ar.md)).
 
-### 6.2 أتمتة الموردين
+### 6.2 التنفيذ (منجز)
 
-قوالب لكل مورّد (Cisco IOS-XR، Juniper JunOS، Arista EOS) تُولّد الأوامر من قالب واحد
-مع متغيّرات `{prefix}`, `{port}`, `{proto}`, `{rate}`. اختيار القالب عبر حقل
-`vendor` في موصّل BGP، مع `testBGPConnector` يتحقّق من القدرة.
-
-### 6.3 خطة التنفيذ
-
-1. `controller/internal/api/bgp_connector.go`: إضافة `Vendor` و`FlowspecEnabled`.
-2. `controller/internal/action/bgp.go`: دالة `announceFlowspec` / `withdrawFlowspec`.
-3. توسيع `scheduled_actions` ليشمل `flowspec_withdraw`.
-4. اختبارات محاكاة `vtysh` عبر stub.
+1. `controller/internal/bgp/` — متحدث مدمج وترميز المسارات (`AddPath`/`DeletePath`) وإعادة البناء عند البدء.
+2. `controller/internal/api/bgp_instance.go` و`bgp_connector.go` — هوية المثيل وتعريف الجيران (neighbor_ip/asn/md5).
+3. `controller/internal/action/bgp.go` و`bgp_flowspec.go` — تنفيذ/سحب الإعلانات بعدّ مرجعي عبر المتحدّث.
 
 ---
 
@@ -286,7 +271,7 @@ flowspec
 | م2 | Fast-path + عتبة عينات تكيفية (منجز جزئيًا) | اختبارات tracker/action تمرّ |
 | م2ب | Narrow-then-rebreadth + مراجعة manual | سيناريو hit-and-run يُخفَّف < 2s |
 | م3 | فكّكا L7 + أعمدة الإحصاء | كشف HTTP flood وSlowloris في اختبار |
-| م4 | BGP Flowspec + قوالب الموردين | htb/stub vtysh + تحقق من الأوامر |
+| م4 | BGP Flowspec/RTBH بمتحدّث مدمج | اختبارات المتحدّث/الترميز + تكامل GoBGP |
 | م5 | harness اختبار 10Gbps + سيناريوهات فوضى | تقرير أداء مُوثّق |
 | م6 | توثيق تشغيلي نهائي + دليل ترقية | `docs/` محدّثة |
 

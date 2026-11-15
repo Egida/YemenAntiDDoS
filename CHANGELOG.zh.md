@@ -4,6 +4,8 @@
 
 ### 重点变化（企业级升级）
 
+- BGP 说话器：Controller 现内嵌 GoBGP，通过真实 BGP 会话下发 Flowspec（RFC 8955）与 RTBH（RFC 7999 黑洞）路由。连接器改为邻居定义（neighbor_ip/neighbor_asn/md5），并新增 Settings → BGP Instance（本地 ASN、router-id）配置实例身份。移除本地 FRR/vtysh 路径与多厂商 CLI 导出 — [docs/FLOWSPEC.md](docs/FLOWSPEC.md)（阿文：[docs/FLOWSPEC.ar.md](docs/FLOWSPEC.ar.md)）。
+
 - 五大支柱的企业级加固：Controller↔Node gRPC 链路的 mTLS、零接触 fast-path 缓解、L7 可见性（`shared/l7`）、多厂商 BGP Flowspec（含 FRR），以及控制台阿拉伯语（RTL）界面。
 - 双向 TLS：`tls.enabled` 将 gRPC 链路升级为 TLS 1.3，节点身份取自客户端证书的 URI SAN（`spiffe://xsight/node/<node_id>`）；`xsight-cert` 工具生成 CA / 叶子证书。上线与轮换见 [docs/MTLS.md](docs/MTLS.md)（阿文：[docs/MTLS.ar.md](docs/MTLS.ar.md)）。
 - 动作引擎：`action_engine.fast_path_multiplier`（缺省 5.0）在实测速率达到阈值该倍数时于第一个检测周期即确认攻击；`action_engine.xdrop_adaptive_samples` 对明确的样本降低采样下限。两者均记录在 `controller/config.example.yaml`。

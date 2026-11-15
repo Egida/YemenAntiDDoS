@@ -4,6 +4,8 @@
 
 ### Highlights (enterprise upgrade)
 
+- BGP speaker: the controller now embeds GoBGP and originates Flowspec (RFC 8955) and RTBH (RFC 7999 blackhole) over real BGP sessions. Connectors are neighbor definitions (neighbor_ip/neighbor_asn/md5) under a new Settings → BGP Instance (local ASN, router-id). The local-FRR/vtysh path and multi-vendor CLI export are removed — [docs/FLOWSPEC.md](docs/FLOWSPEC.md) (AR: [docs/FLOWSPEC.ar.md](docs/FLOWSPEC.ar.md)).
+
 - Enterprise hardening across five pillars: mTLS on the Controller↔Node gRPC link, zero-touch fast-path mitigation, Layer 7 visibility (`shared/l7`), multi-vendor BGP Flowspec with FRR, and an Arabic (RTL) console UI.
 - Mutual TLS: `tls.enabled` upgrades the gRPC link to TLS 1.3 with node identity taken from the client certificate's URI SAN (`spiffe://xsight/node/<node_id>`); the `xsight-cert` helper generates CA/leaf material. Rollout and rotation: [docs/MTLS.md](docs/MTLS.md) (AR: [docs/MTLS.ar.md](docs/MTLS.ar.md)).
 - Action engine: `action_engine.fast_path_multiplier` (default 5.0) confirms an attack on the first detection tick when the measured rate is that many times the threshold, and `action_engine.xdrop_adaptive_samples` lowers the sample floor for unambiguous samples. Both are documented in `controller/config.example.yaml`.
