@@ -323,9 +323,35 @@ func (r *dao5BGPAnnouncements) stateWrite(ctx context.Context, failed bool, id, 
 	return nil
 }
 
+func (r *dao5BGPAnnouncements) MarkWithdrawn(ctx context.Context, id, gen int) error {
+	r.mu.Lock()
+	fail := r.failWithdrawn > 0
+	if fail {
+		r.failWithdrawn--
+	}
+	hook := r.onFailure
+	r.mu.Unlock()
+	if fail {
+		if hook != nil {
+			hook()
+		}
+		return errors.New("dao5b force withdraw fail")
+	}
+	return r.BGPAnnouncementRepo.MarkWithdrawn(ctx, id, gen)
+}
+
 func (r *dao5BGPAnnouncements) MarkFailedWithdraw(ctx context.Context, id, gen int, msg string) error {
-	if r.failFailed > 0 {
+	r.mu.Lock()
+	fail := r.failFailed > 0
+	if fail {
 		r.failFailed--
+	}
+	hook := r.onFailure
+	r.mu.Unlock()
+	if fail {
+		if hook != nil {
+			hook()
+		}
 		return errors.New("dao5b force fail")
 	}
 	return r.BGPAnnouncementRepo.MarkFailedWithdraw(ctx, id, gen, msg)
