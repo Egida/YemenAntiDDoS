@@ -50,7 +50,7 @@ async function load(kind: Kind | 'legacy') {
     if (alive) { panel.loading = false; panel.loaded = true }
   }
 }
-onMounted(() => { for (const kind of [...kinds, 'legacy'] as const) void load(kind) })
+onMounted(() => { void loadInstance(); for (const kind of [...kinds, 'legacy'] as const) void load(kind) })
 const drawer = ref(false)
 const drawerKind = ref<Kind>('bgp')
 const editing = ref<ConnectorRow>()
@@ -121,6 +121,70 @@ const routesName = ref('')
 const routesOutput = ref('')
 const routesBusy = ref<number>()
 const routeErrors = reactive<Record<number, string>>({})
+
+interface BGPInstance { local_asn: number; router_id: string; listen_port: number; rtbh_next_hop: string }
+interface BGPPeer { connector_id?: number; name?: string; neighbor_ip?: string; session_up?: boolean }
+const instance = reactive({
+  loaded: false, loading: true, error: '', saving: false, configured: false, speakerRunning: false,
+  restart: '', peers: [] as BGPPeer[], peersError: '',
+  form: { local_asn: 65000, router_id: '', listen_port: 179, rtbh_next_hop: '' } as BGPInstance,
+})
+async function loadInstance() {
+  instance.loading = true
+  instance.error = ''
+  try {
+    const [reply, peers] = await Promise.all([
+      request<any>('/api/settings/bgp-instance', { signal: controller.signal }),
+      request<any>('/api/bgp/peers', { signal: controller.signal }).catch(() => null),
+    ])
+    if (!alive) return
+    instance.configured = !!reply?.configured
+    instance.speakerRunning = !!reply?.speaker_running
+    const src = reply?.instance ?? {}
+    instance.form.local_asn = Number(src.local_asn ?? 65000)
+    instance.form.router_id = String(src.router_id ?? '')
+    instance.form.listen_port = Number(src.listen_port ?? 179)
+    instance.form.rtbh_next_hop = String(src.rtbh_next_hop ?? '')
+    if (peers) {
+      instance.peers = Array.isArray(peers.peers) ? peers.peers : []
+      instance.speakerRunning = peers.speaker_running ?? instance.speakerRunning
+      instance.peersError = ''
+    }
+  } catch (error) { if (alive) instance.error = rawError(error) }
+  finally { if (alive) { instance.loading = false; instance.loaded = true } }
+}
+function instanceCheck() {
+  const asn = Number(instance.form.local_asn)
+  if (!Number.isInteger(asn) || asn < 1 || asn > 4294967295 || !instance.form.router_id.trim()) return t('connectors.instanceRequired')
+  if (!/^(?:\d{1,3}\.){3}\d{1,3}$/.test(instance.form.router_id.trim())) return t('connectors.routerIdInvalid')
+  const lp = Number(instance.form.listen_port)
+  if (!Number.isInteger(lp) || lp < 0 || lp > 65535) return t('connectors.listenPortInvalid')
+  const nh = instance.form.rtbh_next_hop.trim()
+  if (nh && !/^\S+$/.test(nh)) return t('connectors.rtbhInvalid')
+  return ''
+}
+async function saveInstance() {
+  if (instance.saving || !isAdmin()) return
+  const msg = instanceCheck()
+  if (msg) { instance.error = msg; return }
+  instance.saving = true
+  instance.error = ''
+  instance.restart = ''
+  try {
+    const body = {
+      local_asn: Number(instance.form.local_asn),
+      router_id: instance.form.router_id.trim(),
+      listen_port: Number(instance.form.listen_port),
+      rtbh_next_hop: instance.form.rtbh_next_hop.trim(),
+    }
+    const reply = await notifyWrite(request<any>('/api/settings/bgp-instance', { method: 'PUT', body: JSON.stringify(body) }), t('connectors.instanceSaved'))
+    if (alive) {
+      instance.restart = (reply?.restart_required ? t('connectors.restartRequired') : '')
+      await loadInstance()
+    }
+  } catch (error) { if (alive) instance.error = rawError(error) }
+  finally { if (alive) instance.saving = false }
+}
 async function routes(row: ConnectorRow) {
   if (routesBusy.value !== undefined) return
   delete routeErrors[row.id]
@@ -142,6 +206,40 @@ async function routes(row: ConnectorRow) {
     <div class="page-head"><h1>{{ t('nav.connectors') }}</h1></div>
     <XSeg :model-value="selected" :options="segments" :label="t('connectors.type')"
       @update:model-value="router.push($event === 'all' ? '/connectors' : '/connectors/' + $event)" />
+    <section v-if="visible.includes('bgp')" class="panel cn-panel cn-instance">
+      <div class="panel-head"><h2>{{ t('connectors.instance') }}
+        <XTip :text="t('connectors.instanceWhat')" wide /></h2>
+        <div class="actions">
+          <XPill :tone="instance.configured ? 'ok' : 'neutral'">{{ t('connectors.' + (instance.configured ? 'configured' : 'notConfigured')) }}</XPill>
+          <XPill :tone="instance.speakerRunning ? 'ok' : 'neutral'">{{ t('connectors.' + (instance.speakerRunning ? 'speakerRunning' : 'speakerStopped')) }}</XPill>
+        </div></div>
+      <p v-if="instance.error" class="crit cn-note" role="alert"><span class="mono">{{ instance.error }}</span>
+        <button class="btn sm" @click="loadInstance">{{ t('connectors.retry') }}</button></p>
+      <XEmpty v-else-if="instance.loading" loading />
+      <div v-else class="form cn-form cn-instance-form">
+        <div class="cn-grid">
+          <label class="field"><span>{{ t('connectors.localAsn') }}</span>
+            <input v-model.number="instance.form.local_asn" type="number" min="1" max="4294967295" class="mono" :disabled="!isAdmin() || instance.saving"></label>
+          <label class="field"><span>{{ t('connectors.routerId') }}</span>
+            <input v-model="instance.form.router_id" class="mono" :disabled="!isAdmin() || instance.saving" placeholder="192.0.2.10"></label>
+          <label class="field"><span>{{ t('connectors.listenPort') }} <XTip :text="t('connectors.listenPortTip')" wide /></span>
+            <input v-model.number="instance.form.listen_port" type="number" min="0" max="65535" class="mono" :disabled="!isAdmin() || instance.saving"></label>
+          <label class="field"><span>{{ t('connectors.rtbhNextHop') }} <XTip :text="t('connectors.rtbhNextHopTip')" wide /></span>
+            <input v-model="instance.form.rtbh_next_hop" class="mono" :disabled="!isAdmin() || instance.saving" placeholder="203.0.113.1"></label>
+        </div>
+        <div class="toolbar">
+          <button v-if="isAdmin()" class="btn primary sm" :disabled="instance.saving" @click="saveInstance">{{ t('connectors.' + (instance.saving ? 'saving' : 'save')) }}</button>
+          <span v-if="instance.restart" class="ok">{{ instance.restart }}</span>
+        </div>
+      </div>
+      <div v-if="!instance.loading" class="cn-peers">
+        <div class="panel-head"><h3>{{ t('connectors.peers') }} <span class="num sub">{{ instance.peers.length }}</span></h3></div>
+        <div v-if="instance.peers.length" class="tbl-wrap"><table><thead><tr><th>{{ t('connectors.name') }}</th><th>{{ t('connectors.neighborIp') }}</th><th class="cn-status">{{ t('connectors.status') }}</th></tr></thead>
+          <tbody><tr v-for="p in instance.peers" :key="String(p.connector_id)+String(p.neighbor_ip)"><td>{{ p.name || ('#'+(p.connector_id??'')) }}</td><td class="mono">{{ p.neighbor_ip || '' }}</td>
+            <td><XPill :tone="p.session_up ? 'ok' : 'neutral'">{{ t('connectors.' + (p.session_up ? 'peerUp' : 'peerDown')) }}</XPill></td></tr></tbody></table></div>
+        <p v-else class="sub">{{ t('connectors.noPeers') }}</p>
+      </div>
+    </section>
     <template v-for="kind in visible" :key="kind">
       <section class="panel cn-panel" :data-kind="kind">
         <div class="panel-head"><h2>{{ kindName[kind] }}
@@ -250,6 +348,10 @@ async function routes(row: ConnectorRow) {
 .cn-disabled { color: var(--muted); }
 .cn-disabled strong { font-weight: 400; }
 .cn-disabled .pill { color: var(--muted); }
+.cn-instance-form { padding: 12px 16px; }
+.cn-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.cn-peers { padding: 0 16px 12px; }
+.cn-peers h3 { margin: 8px 0; font-size: 1em; }
 .cn-output { max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0; }
 .cn-close { float: right; }
 .cn-result .crit, .cn-route-error .crit { background: var(--tint-crit); padding: 8px; }

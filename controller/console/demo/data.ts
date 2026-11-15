@@ -118,8 +118,10 @@ export function createData(now = Date.now()) {
     delivery_version: 24, created_at: iso(-day) },
   { id: 2, user_id: 2, entity_type: 'watch_prefix', entity_id: 2, action: 'update',
     diff: { before: { name: 'Web' }, after: { name: 'Web A' } }, delivery_version: 23, created_at: iso(-2 * day) }]
+  const bgpInstance = { configured: true, instance: { local_asn: 65000, router_id: '192.0.2.10', listen_port: 179, rtbh_next_hop: '203.0.113.1' }, speaker_running: true }
+  const bgpPeers: Row[] = []
   return { now, nodes, prefixes, templates, rules, connectors, responses, actions, conditions, attacks,
-    xdrop, bgp, executions, listeners, sources, users, audit }
+    xdrop, bgp, executions, listeners, sources, users, audit, bgpInstance, bgpPeers }
 }
 export type Dataset = ReturnType<typeof createData>
 

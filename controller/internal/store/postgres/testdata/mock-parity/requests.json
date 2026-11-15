@@ -25,7 +25,7 @@
     },
     {
       "file": "views/connectors/Connectors.vue",
-      "count": 1,
+      "count": 2,
       "steps": [
         "qg-bgp-in-use",
         "qg-xdrop-in-use",

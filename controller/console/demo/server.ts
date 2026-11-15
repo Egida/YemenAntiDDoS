@@ -107,7 +107,19 @@ export function createServer(data: Dataset = createData()): Server {
         && typeof body?.password === 'string' && body.password.length) return send(session)
       return send({ error: 'username and password required' }, 400)
     }
-    if (method !== 'GET') return send({ error: 'admin role required' }, 403)
+    if (method !== 'GET') {
+      if (method === 'PUT' && path === '/api/settings/bgp-instance' && body && typeof body === 'object') {
+        const cur = data.bgpInstance?.instance || { local_asn: 65000, router_id: '192.0.2.10', listen_port: 179, rtbh_next_hop: '' }
+        const next = { ...cur }
+        if (typeof body.local_asn === 'number') next.local_asn = body.local_asn
+        if (typeof body.router_id === 'string') next.router_id = body.router_id
+        if (typeof body.listen_port === 'number') next.listen_port = body.listen_port
+        if (typeof body.rtbh_next_hop === 'string') next.rtbh_next_hop = body.rtbh_next_hop
+        data.bgpInstance = { configured: true, instance: next, speaker_running: data.bgpInstance?.speaker_running ?? true }
+        return send({ ok: true, restart_required: true, note: 'instance identity changes take effect after controller restart' })
+      }
+      return send({ error: 'admin role required' }, 403)
+    }
     const number = (key: string, fallback: number) => q.has(key) ? Number(q.get(key)) : fallback
     const page = (rows: Row[]) => rows.slice(Math.max(0, number('offset', 0)),
       Math.max(0, number('offset', 0)) + Math.max(0, Math.min(1000, number('limit', 100))))
@@ -357,10 +369,8 @@ export function createServer(data: Dataset = createData()): Server {
       && (!q.has('from') || Date.parse(r.created_at) >= Date.parse(q.get('from')!))
       && (!q.has('to') || Date.parse(r.created_at) <= Date.parse(q.get('to')!)))))
     if (path === '/api/flowspec/announcements') return send({ announcements: [] })
-    if (path === '/api/settings/bgp-instance') return send({ configured: true,
-      instance: { local_asn: 65000, router_id: '192.0.2.10', listen_port: 179, rtbh_next_hop: '203.0.113.1' },
-      speaker_running: true })
-    if (path === '/api/bgp/peers') return send({ peers: [], speaker_running: true })
+    if (path === '/api/settings/bgp-instance') return send(data.bgpInstance)
+    if (path === '/api/bgp/peers') return send({ peers: data.bgpPeers, speaker_running: !!data.bgpInstance?.speaker_running })
     if (path === '/api/l7/summary') return send({ generated_at: new Date().toISOString(), window_minutes: 5, bucket_seconds: 60,
       totals: { 'l7_http_flood': 0, 'l7_tls_clienthello': 0, 'l7_slowloris': 0 }, rates: {}, series: [], targets: [],
       sources: [], nodes: [], recent: [], dropped: 0 })
