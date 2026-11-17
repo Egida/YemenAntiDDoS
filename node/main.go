@@ -363,7 +363,6 @@ func main() {
 		enabled: inlineActive,
 	}
 	rpt.SetPostureFunc(posture.snapshot)
-
 	// v4.0: kernel burst alerts → CriticalEventStream (sub-second path).
 	if inlineActive || cfg.Inline.Enabled {
 		streamBurstAlerts(collectorCtx, mgr, rpt, cfg.NodeID, primaryIface.Name, &posture.burstAlerts)

@@ -36,7 +36,7 @@
 2. The controller's **ingestion** layer writes each report into in-memory **ring buffers** (real-time detection) and batches it into the `ts_stats` table (charts, baselines). Flow summaries go to `flow_logs`.
 3. Every second, **detection** compares ring data with static threshold rules and, when enabled, with dynamic baseline profiles.
 4. Breaches pass alert de-duplication and feed the **attack tracker**, which confirms, keeps alive and ends attacks.
-5. Tracker events are queued to the **action engine**, which resolves the response, applies the dispatch gates and runs BGP (FRR `vtysh`), xDrop (XDrop v3 REST API), webhook and shell actions.
+5. Tracker events are queued to the **action engine**, which resolves the response, applies the dispatch gates and runs BGP (embedded GoBGP speaker via real BGP sessions), xDrop (XDrop v3 REST API), webhook and shell actions.
 6. When prefixes, thresholds or flow listeners change, the **config publisher** pushes a new watch configuration to the nodes.
 
 ### Node ↔ Controller Protocol
@@ -179,11 +179,11 @@ Creating an xDrop or BGP action with `trigger_phase: on_detected` also creates a
 
 A BGP route is a shared, reference-counted resource keyed on `(prefix, route_map, connector_id)` in `bgp_announcements`, with one row per attached attack in `bgp_announcement_attacks`.
 
-- **Attach** (`on_detected`): under a row lock, the first attack inserts the announcement (`announcing`) and runs `vtysh`: `configure terminal` → `router bgp <ASN>` → `address-family ipv4|ipv6 unicast` (chosen from the prefix) → `network <prefix> route-map <name>`; success makes it `active`. Later attacks only increase `refcount` and do not call `vtysh`. Host attacks are announced as /32 or /128; subnet attacks as their prefix.
+- **Attach** (`on_detected`): under a row lock, the first attack inserts the announcement (`announcing`) and the embedded GoBGP speaker originates the route over the configured BGP session; success makes it `active`. Later attacks only increase `refcount` and do not re-announce. Host attacks are announced as /32 or /128; subnet attacks as their prefix.
 - **Detach** (`on_expired`): decreases `refcount`. At 0 the announcement becomes `delayed` (if the delay is > 0) or `withdrawing`, then `no network …` makes it `withdrawn`. The delay is the **maximum** `bgp_withdraw_delay_minutes` of all attacks attached in the current announce cycle.
 - **Business key** in logs: `external_rule_id = <prefix>|<route_map>`.
 - **Orphans**: at startup the controller lists the BGP tables of enabled connectors; routes without a matching announcement are stored as `orphan`, and the operator withdraws or dismisses them from the Web UI.
-- **Reconciliation**: `announcing` rows are checked against FRR with read-only commands after two minutes; stuck `withdrawing` and failed rows with no remaining attachments are retried under an announcement lock. Each `vtysh` call has a 60-second deadline.
+- **Reconciliation**: `announcing` rows are checked against the speaker's RIB after two minutes; stuck `withdrawing` and failed rows with no remaining attachments are retried under an announcement lock. Each speaker call has a 60-second deadline.
 
 ### xDrop Execution
 
@@ -232,7 +232,7 @@ Delayed BGP withdrawals and xDrop releases are persisted in `scheduled_actions`,
 
 ### Manual Override (Force Remove)
 
-1. For BGP, Force Remove first commits detachment of all attached attacks, then writes their manual overrides and audit logs, and finally runs vtysh withdrawal. Every attached attack loses the shared route's protection; a failed withdrawal does not undo the recorded overrides.
+1. For BGP, Force Remove first commits detachment of all attached attacks, then writes their manual overrides and audit logs, and finally withdraws the route via the speaker. Every attached attack loses the shared route's protection; a failed withdrawal does not undo the recorded overrides.
 2. For xDrop, Force Unblock releases the hold of this attack and action; xDrop deletes the rule after its last holder releases it. It may first wait up to one connector timeout for an automatic release in progress. A failed-create record is checked read-only first and then released or closed locally; a successful local closure does not prove that a release reached xDrop.
 3. Later automatic `on_expired` processing checks `action_manual_overrides` per artifact and skips only the overridden artifact.
 
@@ -264,7 +264,7 @@ The Active Mitigations page reads the state tables directly:
 - **xDrop section**: `xdrop_active_rules WHERE status IN ('active', 'delayed', 'failed')`.
 - **Detail timeline**: `bgp_announcement_events` for BGP; execution-log entries plus `action_manual_overrides` for xDrop.
 
-For BGP rows in an attack's action log, the API adds `bgp_role`: `triggered` (this attack caused the `vtysh` announce) or `attached_shared` (it joined an existing announcement).
+For BGP rows in an attack's action log, the API adds `bgp_role`: `triggered` (this attack caused the speaker announce) or `attached_shared` (it joined an existing announcement).
 
 ### Startup Recovery
 
@@ -305,7 +305,7 @@ Deleting expired ended attacks also deletes their execution logs and related sta
 - **REST authentication.** Every `/api` route except `POST /api/login` needs `X-API-Key: <auth.api_key>` or `Authorization: Bearer <JWT>`. The API key acts as an administrator.
 - **Admin-only writes.** GET requests are allowed for any signed-in user. Every other method requires role `admin`; `viewer` and the legacy `operator` role are read-only (403).
 - **Last admin.** The last enabled admin cannot be deleted, demoted or disabled (409).
-- **Per-request re-check.** Each JWT request reloads the user and compares its last-modified time with the token. Deleted, disabled or modified users get 401 at once. Tokens live at most 24 hours. The signing secret is derived from `auth.api_key`, so changing the key invalidates all tokens.
+- **Per-request re-check.** Each JWT request reloads the user and compares its last-modified time with the token. Deleted, disabled or modified users get 401 at once. Tokens live at most 24 hours. The signing secret is `auth.jwt_secret` (set separately from `auth.api_key`); changing it invalidates all tokens.
 - **Login rate limit.** In-memory, per 15-minute window: 5 attempts per username + source address, 20 per source address, at most 10,000 tracked keys; excess requests get 429 with `Retry-After`. The source is the TCP peer address; proxy headers are not trusted, so clients behind one NAT or reverse proxy share a limit.
 - **Audit.** Configuration changes and force-remove/orphan operations write `config_audit_log` on a best-effort basis; publication skips the row if building the watch config or listing nodes fails, and audit-write errors are only logged. Manual attack expiry is not audited. Webhook header values are masked in API output and audit diffs; xDrop keys appear as `***` plus the last four characters (just `***` for keys of at most four characters). Passwords, password hashes and node API keys are not recorded.
 - **`/metrics` is unauthenticated**, like other Prometheus exporters. Restrict the HTTP port at the network level.

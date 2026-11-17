@@ -37,6 +37,9 @@ func validateWebhookConnector(req *store.WebhookConnector) error {
 			}
 		}
 	}
+	if u, err := url.ParseRequestURI(req.URL); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("url must be a valid http(s) URL")
+	}
 	return nil
 }
 

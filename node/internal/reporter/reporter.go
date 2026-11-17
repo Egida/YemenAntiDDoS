@@ -118,14 +118,18 @@ func (r *Reporter) SetDeliveryVersion(v uint64) {
 // SetBatcher sets the batcher reference for SamplingMetrics.
 // Must be called before Run().
 func (r *Reporter) SetBatcher(b *sampler.Batcher) {
+	r.mu.Lock()
 	r.batcher = b
+	r.mu.Unlock()
 }
 
 // SetHeartbeat sets the constructor used after a second without a successful send.
 // Must be called before Run().
 // SetPostureFunc installs the NodePosture supplier.
 func (r *Reporter) SetPostureFunc(fn func() *pb.NodePosture) {
+	r.mu.Lock()
 	r.cfg.PostureFunc = fn
+	r.mu.Unlock()
 }
 
 func (r *Reporter) SetHeartbeat(fn func() *pb.StatsReport) {
@@ -447,8 +451,11 @@ func (r *Reporter) runStatsStream(ctx context.Context, initialGap uint32) error 
 			}
 			r.upstreamRate.Store(rate)
 			msg := reportToProto(report, r.cfg.NodeID, r.cfg.InterfaceName, rate, gapSeconds, r.batcher, r.BatchSendLatencyMs())
-			if r.cfg.PostureFunc != nil {
-				msg.Posture = r.cfg.PostureFunc()
+			r.mu.Lock()
+			postureFunc := r.cfg.PostureFunc
+			r.mu.Unlock()
+			if postureFunc != nil {
+				msg.Posture = postureFunc()
 			}
 			if err := ss.Send(ctx, msg); err != nil {
 				return err
@@ -565,6 +572,28 @@ func (r *Reporter) runControlStream(ctx context.Context, initial *pb.ConfigAck) 
 			log.Printf("reporter: received ConfigPush version=%d prefixes=%d",
 				cp.DeliveryVersionCurrent,
 				len(cp.GetWatchConfig().GetPrefixes()))
+
+			// Stale push (inline reconcile raced with a newer publish): do not
+			// regress the watch config; acknowledge the current version instead.
+			r.mu.Lock()
+			dv := r.deliveryVersion
+			r.mu.Unlock()
+			if cp.DeliveryVersionCurrent < dv {
+				log.Printf("reporter: stale ConfigPush version=%d (current %d); ignoring",
+					cp.DeliveryVersionCurrent, dv)
+				ack := &pb.ControlMessage{
+					Payload: &pb.ControlMessage_ConfigAck{
+						ConfigAck: &pb.ConfigAck{
+							DeliveryVersionApplied: dv,
+							Success:                true,
+						},
+					},
+				}
+				if err := ss.Send(ctx, ack); err != nil {
+					return err
+				}
+				continue
+			}
 
 			// Apply config (HotSwap + snapshot)
 			success := true

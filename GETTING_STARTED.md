@@ -115,6 +115,7 @@ database:
 
 auth:
   api_key: "REPLACE_WITH_RANDOM_SECRET"        # e.g. openssl rand -hex 32
+  jwt_secret: "REPLACE_WITH_RANDOM_SECRET"      # e.g. openssl rand -hex 32 — JWT signing key for Web UI sessions
   initial_admin_password: "REPLACE_WITH_STRONG_PASSWORD"
 
 action_engine:
@@ -124,7 +125,8 @@ action_engine:
 | Key | Required | Rule |
 |---|---|---|
 | `database.dsn` | yes | must not be empty |
-| `auth.api_key` | yes | must not be empty or `CHANGE_ME`. It is the REST API key (header `X-API-Key`, full admin rights) and also the base of the session-signing secret, so changing it signs every user out. |
+| `auth.api_key` | yes | must not be empty or `CHANGE_ME`. It is the REST API key (header `X-API-Key`, full admin rights). |
+| `auth.jwt_secret` | yes | must not be empty. JWT signing key for Web UI sessions; changing it signs every user out. Generate with `openssl rand -hex 32`. |
 | `auth.initial_admin_password` | on first start | 8–72 bytes and not `admin`. If the user table is empty and this is not set, the controller refuses to start (`no users exist; set auth.initial_admin_password to create the first admin`). With it set, the controller creates the user **`admin`** with this password. Remove the key after the first successful start. |
 | `listen.http` / `listen.grpc` | no | defaults `:8080` (Web UI + REST API + `/metrics`) and `:50051` (node gRPC) |
 
@@ -236,7 +238,7 @@ sudo systemctl enable --now xsight-node      # runs as root, LimitMEMLOCK=infini
 
 Logs go to the journal: `journalctl -u xsight-controller -f`, `journalctl -u xsight-node -f`.
 
-If you use BGP actions, the controller's user must be able to run `vtysh` (path set per BGP connector, default `/usr/bin/vtysh`).
+If you use BGP actions, configure BGP Instance settings (local ASN, router ID, listen port, RTBH next hop) and BGP Connectors (neighbor IP/ASN, optional MD5 password) in the Web Console under Settings → BGP.
 
 ---
 

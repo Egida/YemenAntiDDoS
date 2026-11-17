@@ -368,9 +368,11 @@ func TestDao13d_G2(t *testing.T) {
 			return count
 		}
 		protected = protectedCount(bgp)
-		// Flowspec pillar: markFlowspecAnnounceFailed is the second sanctioned
-		// production call site — also wrapped in retryBGPStateWrite.
-		flowspecMark := dao13dFn(t, dao13dParse(t, "internal/action/bgp_flowspec.go"), "markFlowspecAnnounceFailed")
+		// Flowspec pillar: markAnnounceFailed (unified RTBH/Flowspec
+		// compensation after the GoBGP refactor; was markFlowspecAnnounceFailed)
+		// is the second sanctioned production call site — also wrapped in
+		// retryBGPStateWrite.
+		flowspecMark := dao13dFn(t, dao13dParse(t, "internal/action/bgp_flowspec.go"), "markAnnounceFailed")
 		flowspecCalls := dao13dCalls(flowspecMark, "MarkFailedAnnounce")
 		flowspecProtected := protectedCount(flowspecMark)
 		engine := dao13dParse(t, "internal/action/engine.go")
@@ -397,8 +399,8 @@ func TestDao13d_G2(t *testing.T) {
 			}
 			return true
 		})
-		if warnings != 3 {
-			t.Errorf("S7 definite-failure warnings=%d; want 3", warnings)
+		if warnings != 4 {
+			t.Errorf("S7 definite-failure warnings=%d; want 4", warnings)
 		}
 	})
 }

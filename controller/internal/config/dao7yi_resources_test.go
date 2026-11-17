@@ -12,7 +12,7 @@ func TestDao7yi_R1_DefaultRingEstimate(t *testing.T) {
 	}
 }
 func TestDao7yi_R2_NewEstimateDoesNotReject(t *testing.T) {
-	cfg := &Config{Database: DatabaseConfig{Driver: "postgres", DSN: "test-only"}, Auth: AuthConfig{APIKey: "dao7-test-key"}, Action: ActionConfig{Mode: "observe"}, Detection: DetectionConfig{ExpiryFunction: "static"}, Ring: RingConfig{MaxGlobalKeys: 200000, MaxPointsPerIP: 120, MaxIPsPerPrefix: 10000}}
+	cfg := &Config{Database: DatabaseConfig{Driver: "postgres", DSN: "test-only"}, Auth: AuthConfig{APIKey: "dao7-test-key", JWTSecret: "dao7-jwt-secret-12345678901234567890123456789012"}, Action: ActionConfig{Mode: "observe"}, Detection: DetectionConfig{ExpiryFunction: "static"}, Ring: RingConfig{MaxGlobalKeys: 200000, MaxPointsPerIP: 120, MaxIPsPerPrefix: 10000}}
 	if RingEstimateBytes(cfg) <= 8*1024*1024*1024 {
 		t.Fatal("new estimate must exceed 8 GiB")
 	}

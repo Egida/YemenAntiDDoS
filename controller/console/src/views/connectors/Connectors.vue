@@ -272,8 +272,6 @@ async function routes(row: ConnectorRow) {
                   <button v-if="kind === 'bgp' && probeable(kind, row)" class="btn sm ghost"
                     :disabled="routesBusy !== undefined"
                     @click="routes(row)">{{ t('connectors.routes') }}</button>
-                  <span v-if="kind === 'bgp' && !probeable(kind, row)" class="sub"
-                    :title="t('connectors.exportOnlyTip')">{{ t('connectors.exportOnly') }}</span>
                   <button v-if="isAdmin()" class="btn sm ghost" @click="confirmDelete(kind, row)">
                     {{ t('connectors.delete') }}</button>
                 </div></td>

@@ -10,6 +10,7 @@ import (
 
 	api "github.com/osrg/gobgp/v3/api"
 	"github.com/osrg/gobgp/v3/pkg/apiutil"
+	"github.com/osrg/gobgp/v3/pkg/log"
 	"github.com/osrg/gobgp/v3/pkg/packet/bgp"
 	"github.com/osrg/gobgp/v3/pkg/server"
 
@@ -18,6 +19,19 @@ import (
 )
 
 const speakerTimeout = 30 * time.Second
+
+// noiseFilterLogger wraps gobgp's default logger to drop the noisy
+// "cannot set TTL (255) for TCPListener ... operation not supported"
+// warnings that GoBGP emits in containers lacking the socket capability.
+// The speaker continues to operate normally; only the warning is dropped.
+type noiseFilterLogger struct{ log.DefaultLogger }
+
+func (l *noiseFilterLogger) Warn(msg string, fields log.Fields) {
+	if strings.Contains(msg, "cannot set TTL") && strings.Contains(msg, "TCPListener") {
+		return
+	}
+	l.DefaultLogger.Warn(msg, fields)
+}
 
 // GobgpSpeaker runs an embedded gobgp.Server. Paths live in memory; recovery
 // re-adds them from bgp_announcements after a restart (see action.RecoverBGPRoutes).
@@ -84,7 +98,7 @@ func (s *GobgpSpeaker) Start(_ context.Context) error {
 	s.peersMu.Lock()
 	s.peers = map[int]Peer{}
 	s.peersMu.Unlock()
-	srv := server.NewBgpServer()
+	srv := server.NewBgpServer(server.LoggerOption(&noiseFilterLogger{DefaultLogger: *log.NewDefaultLogger()}))
 	go srv.Serve()
 	ctx, cancel := context.WithTimeout(context.Background(), speakerTimeout)
 	defer cancel()

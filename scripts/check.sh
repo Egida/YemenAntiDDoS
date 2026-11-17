@@ -79,7 +79,7 @@ in_module() {
 
 run fmt check_fmt
 run ctl-vet in_module controller go vet ./...
-run ctl-test in_module controller go test ./... -count=1
+run ctl-test in_module controller go test ./... -count=1 -timeout=10m
 # The internal/api race suite alone measures ~10.5 min — above go test's
 # default 10-minute package timeout — so the race pass raises the budget.
 run ctl-race in_module controller go test -race ./... -count=1 -timeout=20m

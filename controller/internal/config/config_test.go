@@ -24,6 +24,7 @@ database:
   dsn: "postgres://localhost/xsight_test"
 auth:
   api_key: "test-key-123"
+  jwt_secret: "test-jwt-secret-12345678901234567890123456789012"
 `
 
 func TestLoadDefaultConfig(t *testing.T) {
