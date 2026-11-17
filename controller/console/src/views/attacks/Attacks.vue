@@ -146,7 +146,7 @@ const briefTitle = (row: any, xdrop: boolean) => xdrop
         @click="open($event, a.id)" @keydown.enter.self="open($event, a.id)">
         <td><RouterLink :to="'/attacks/' + a.id">#{{ a.id }}</RouterLink></td>
         <td><TargetCell :value="a.dst_ip" :direction="a.direction" /></td>
-        <td :title="a.attack_type + ' · ' + a.decoder_family">{{ a.decoder_family === 'ip'
+        <td :title="a.attack_type + ' · ' + a.decoder_family">{{ a.decoder_family === 'ip' || a.decoder_family === 'ip_other'
           ? t('attacks.ipTotal') : a.decoder_family }}</td>
         <td><XPill :tone="['critical', 'high'].includes(a.severity) ? 'crit'
           : a.severity === 'medium' ? 'warn' : 'neutral'">

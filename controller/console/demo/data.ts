@@ -34,7 +34,8 @@ export function createData(now = Date.now()) {
   const connectors: Record<string, Row[]> = {
     xdrop: [{ ...common, name: 'Edge filter', api_url: 'https://filter.example.com', api_key: '***' }],
     bgp: [{ ...common, name: 'Transit routing', bgp_asn: 64512, vtysh_path: '/usr/bin/vtysh',
-      address_family: 'ipv4', description: 'Service routing', vendor: 'frr', flowspec_enabled: false }],
+      address_family: 'ipv4', description: 'Service routing', vendor: 'frr', flowspec_enabled: false,
+      neighbor_ip: '203.0.113.254', neighbor_asn: 64513 }],
     webhook: [{ ...common, name: 'Event hook', url: 'https://hooks.example.com/events', method: 'POST',
       headers: { Authorization: '******' }, global: false }],
     shell: [{ ...common, name: 'Event logger', command: '/usr/bin/logger', default_args: 'xsight-event',

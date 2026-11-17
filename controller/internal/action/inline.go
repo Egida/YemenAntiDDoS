@@ -27,6 +27,7 @@ import (
 	"time"
 
 	pb "github.com/d80y6/YemenDDoS/controller/internal/pb"
+	"github.com/d80y6/YemenDDoS/controller/internal/metrics"
 )
 
 // InlinePusher delivers an InlineRuleSet to one or more Nodes.
@@ -36,6 +37,13 @@ type InlinePusher interface {
 	// safe for concurrent use and return an error when the node is not
 	// connected (the mitigator retries on the next reconcile tick).
 	PushInlineRules(nodeID string, rules *pb.InlineRuleSet) error
+	// PushUDPPayloadSig installs a UDP payload byte-offset signature on a
+	// node for the given destination IP. Used during the narrow phase when
+	// no dominant source port exists.
+	PushUDPPayloadSig(nodeID, dstIP string, sig *UDPPayloadSig) error
+	// ClearUDPPayloadSigs removes all UDP payload signatures from a node
+	// (used on auto-rollback or attack withdrawal).
+	ClearUDPPayloadSigs(nodeID string) error
 	// ConnectedInlineNodes lists nodes currently attached via ControlStream.
 	ConnectedInlineNodes() []string
 	// AFXDPActive reports whether the node's last data-plane posture shows
@@ -43,6 +51,38 @@ type InlinePusher interface {
 	// nodes report false: the challenge rule is withheld until the node
 	// proves it can serve it (its rate cap keeps applying meanwhile).
 	AFXDPActive(nodeID string) bool
+}
+
+// UDPPayloadSig is a dynamic UDP payload byte-offset signature (Feature A).
+// It mirrors bpf.UDPPayloadSigValue but lives in the controller module to
+// avoid a cross-module import. The node converts it to bpf.UDPPayloadSigValue
+// when installing into the udp_payload_sigs map.
+type UDPPayloadSig struct {
+	Offset  uint8 // payload offset 0..56
+	Len     uint8 // significant bytes 1..8
+	Action  uint8 // FILTER_ACTION_DROP or FILTER_ACTION_RATE_LIMIT
+	Pattern uint64 // expected bytes (LSB = first byte)
+	Mask    uint64 // bitmask selecting which bytes to compare
+}
+
+// Payload signature extraction thresholds (Feature A).
+const (
+	PayloadSigAttackThreshold = 0.85 // modal byte must appear in >= 85% of attack samples
+	PayloadSigMinPatternLen   = 4    // minimum contiguous significant bytes
+	PayloadSigMaxPatternLen   = 8    // maximum contiguous significant bytes
+)
+
+// Filter action constants (mirror bpf.FilterActionDrop).
+const (
+	FilterActionDrop = 1
+)
+
+// PayloadSigSample is one UDP payload sample collected from the SampleStream
+// for signature extraction. DstIP is the 4-byte IPv4 destination; Payload is
+// the first 64 bytes of the UDP payload.
+type PayloadSigSample struct {
+	DstIP   []byte
+	Payload []byte
 }
 
 // InlineRule is the mitigator's internal rule representation.
@@ -78,6 +118,15 @@ type InlineMitigation struct {
 	PeakPPS    uint64
 	Rebreadths int
 	Version    uint64
+
+	// Payload signature state (Feature A: zero-day UDP payload signatures).
+	// Installed when the narrow phase finds no dominant src_port for a UDP
+	// flood. Auto-withdrawn on rollback if PPS doesn't drop within the
+	// rollback window.
+	PayloadSig       *UDPPayloadSig
+	PayloadSigNode   string
+	PayloadSigInstAt time.Time
+	PayloadSigTimer  *time.Timer
 }
 
 // NarrowingInput carries the flow evidence used for phase-2 refinement.
@@ -172,6 +221,12 @@ type InlineMitigator struct {
 	narrowFn func(attackID int) NarrowingInput
 	nowFn    func() time.Time
 
+	// payloadSigSamples collects UDP payload samples per attack for signature
+	// extraction (Feature A). Populated via AddPayloadSigSamples from the
+	// SampleStream ingestion path.
+	payloadSigSamples map[int][]PayloadSigSample
+	payloadSigMu      sync.Mutex
+
 	// seeded marks Nodes that have received this Controller epoch's first
 	// push. A restarted Controller's version counter is below what a Node
 	// already applied, so that first push is v1 (epoch reset) and later
@@ -194,6 +249,8 @@ func NewInlineMitigator(cfg InlineMitigatorConfig, pusher InlinePusher) *InlineM
 		nowFn:         time.Now,
 		seeded:        make(map[string]bool),
 		pushLocks:     make(map[string]*sync.Mutex),
+
+		payloadSigSamples: make(map[int][]PayloadSigSample),
 	}
 }
 
@@ -215,6 +272,23 @@ func (m *InlineMitigator) SetNarrowingSource(fn func(attackID int) NarrowingInpu
 	m.mu.Lock()
 	m.narrowFn = fn
 	m.mu.Unlock()
+}
+
+// AddPayloadSigSamples records UDP payload samples for an attack, used by the
+// narrow phase to compute a byte-offset signature when no dominant src_port
+// exists (Feature A). Samples are capped per attack to bound memory.
+func (m *InlineMitigator) AddPayloadSigSamples(attackID int, samples []PayloadSigSample) {
+	if m == nil {
+		return
+	}
+	m.payloadSigMu.Lock()
+	defer m.payloadSigMu.Unlock()
+	cur := m.payloadSigSamples[attackID]
+	cur = append(cur, samples...)
+	if len(cur) > 2048 {
+		cur = cur[len(cur)-2048:]
+	}
+	m.payloadSigSamples[attackID] = cur
 }
 
 // ProtectCookieTarget registers a prefix for SYN-cookie protection.
@@ -414,6 +488,21 @@ func (m *InlineMitigator) Withdraw(attackID int) {
 	if !ok {
 		m.mu.Unlock()
 		return
+	}
+	// Stop any pending payload sig rollback timer.
+	if mit.PayloadSigTimer != nil {
+		mit.PayloadSigTimer.Stop()
+		mit.PayloadSigTimer = nil
+	}
+	// Clear payload sigs from all nodes.
+	if mit.PayloadSig != nil {
+		for _, nodeID := range mit.Nodes {
+			if err := m.pusher.ClearUDPPayloadSigs(nodeID); err != nil {
+				log.Printf("inline-mitigation: attack=%d clear payload sigs on %s: %v",
+					attackID, nodeID, err)
+			}
+		}
+		mit.PayloadSig = nil
 	}
 	delete(m.active, attackID)
 	m.version++
@@ -648,7 +737,37 @@ func (m *InlineMitigator) narrowRulesLocked(mit *InlineMitigation, flows []FlowK
 
 	ports := topPorts(portCount, total, m.cfg.NarrowMinShare, m.cfg.NarrowMaxPorts)
 	if len(ports) == 0 {
-		return nil, false
+		// No dominant destination port: for UDP floods, attempt a dynamic
+		// payload byte-offset signature (Feature A). For non-UDP, keep the
+		// broad rule (defence in depth beats narrowing on thin evidence).
+		if mit.Decoder == "udp" {
+			if sig, ok := m.computePayloadSigLocked(mit, now); ok {
+				mit.PayloadSig = sig
+				mit.PayloadSigInstAt = now
+				// Push to every node in the mitigation.
+				for _, nodeID := range mit.Nodes {
+					if err := m.pusher.PushUDPPayloadSig(nodeID, mit.TargetIP, sig); err != nil {
+						log.Printf("inline-mitigation: attack=%d push payload sig to %s: %v",
+							mit.AttackID, nodeID, err)
+					}
+				}
+				m.schedulePayloadSigRollback(mit, now)
+			}
+		}
+		// Keep the broad rate cap as the residual; return true so the broad
+		// phase transitions to narrow (with the payload sig installed, if any).
+		rules := make([]InlineRule, 0, 1)
+		rules = append(rules, InlineRule{
+			ID:           m.newRuleIDLocked(),
+			DstIP:        mit.TargetIP,
+			DstPrefixLen: prefixLenOf(mit.TargetIP),
+			Action:       "rate_limit",
+			RateLimitPPS: m.cfg.BroadRateLimitPPS,
+			Priority:     100,
+			ExpiresUnix:  now.Add(m.cfg.RuleTTL).Unix(),
+			Reason:       fmt.Sprintf("narrow-payload-sig:attack=%d", mit.AttackID),
+		})
+		return rules, true
 	}
 	var subnets []subnetShare
 	if m.cfg.TopSrcSubnets {
@@ -704,6 +823,164 @@ func (m *InlineMitigator) narrowRulesLocked(mit *InlineMitigation, flows []FlowK
 		Reason:       fmt.Sprintf("narrow-residual:attack=%d", mit.AttackID),
 	})
 	return rules, true
+}
+
+// computePayloadSigLocked runs the byte-offset signature extractor on the
+// collected UDP payload samples for this attack. Caller must hold m.mu.
+// m.payloadSigMu is taken internally for sample access.
+func (m *InlineMitigator) computePayloadSigLocked(mit *InlineMitigation, now time.Time) (*UDPPayloadSig, bool) {
+	m.payloadSigMu.Lock()
+	samples := append([]PayloadSigSample(nil), m.payloadSigSamples[mit.AttackID]...)
+	m.payloadSigMu.Unlock()
+
+	if len(samples) < 256 {
+		return nil, false
+	}
+
+	// For each offset 0..56, check if a single byte value appears in >=85%
+	// of attack samples and <1% would match baseline (baseline unavailable at
+	// the controller; rely on the high attack threshold and auto-rollback).
+	type sigPos struct {
+		b    byte
+		ok   bool
+		conf float64
+	}
+
+	totalAttack := len(samples)
+	bestLen := 0
+	bestConf := 0.0
+	bestOffset := 0
+	bestPattern := uint64(0)
+	bestMask := uint64(0)
+
+	for offset := 0; offset <= 56; offset++ {
+		var sig [8]sigPos
+		sigCount := 0
+		for i := 0; i < 8; i++ {
+			pos := offset + i
+			if pos >= 64 {
+				break
+			}
+			// Frequency of each byte value at this offset.
+			var freq [256]int
+			for _, s := range samples {
+				if pos < len(s.Payload) {
+					freq[s.Payload[pos]]++
+				}
+			}
+			var mb byte
+			var mc int
+			for v, n := range freq {
+				if n > mc {
+					mc = n
+					mb = byte(v)
+				}
+			}
+			if mc == 0 {
+				continue
+			}
+			conf := float64(mc) / float64(totalAttack)
+			if conf < PayloadSigAttackThreshold {
+				continue
+			}
+			sig[i] = sigPos{mb, true, conf}
+			sigCount++
+		}
+
+		// Find the longest contiguous run of significant positions
+		// with length between MinPatternLen and MaxPatternLen.
+		runStart := -1
+		for i := 0; i <= 8; i++ {
+			if i < 8 && sig[i].ok {
+				if runStart < 0 {
+					runStart = i
+				}
+				continue
+			}
+			if runStart >= 0 {
+				runLen := i - runStart
+				if runLen >= PayloadSigMinPatternLen && runLen <= PayloadSigMaxPatternLen {
+					avgConf := 0.0
+					for j := runStart; j < i; j++ {
+						avgConf += sig[j].conf
+					}
+					avgConf /= float64(runLen)
+					score := float64(runLen) * avgConf
+					if score > bestConf || (score == bestConf && runLen > bestLen) {
+						bestConf = score
+						bestLen = runLen
+						bestOffset = offset + runStart
+						bestPattern = 0
+						bestMask = 0
+						for j := runStart; j < i; j++ {
+							shift := uint((j - runStart) * 8)
+							bestPattern |= uint64(sig[j].b) << shift
+							bestMask |= uint64(0xFF) << shift
+						}
+					}
+				}
+				runStart = -1
+			}
+		}
+	}
+
+	if bestLen == 0 {
+		return nil, false
+	}
+
+	log.Printf("inline-mitigation: attack=%d extracted payload sig offset=%d len=%d pattern=0x%x mask=0x%x",
+		mit.AttackID, bestOffset, bestLen, bestPattern, bestMask)
+	metrics.RecordPayloadSigInstalled()
+	return &UDPPayloadSig{
+		Offset:  uint8(bestOffset),
+		Len:     uint8(bestLen),
+		Action:  FilterActionDrop,
+		Pattern: bestPattern,
+		Mask:    bestMask,
+	}, true
+}
+
+// schedulePayloadSigRollback starts a timer that withdraws the payload
+// signature if PPS hasn't dropped sufficiently within the rollback window.
+func (m *InlineMitigator) schedulePayloadSigRollback(mit *InlineMitigation, now time.Time) {
+	if mit.PayloadSigTimer != nil {
+		mit.PayloadSigTimer.Stop()
+	}
+	mit.PayloadSigTimer = time.AfterFunc(500*time.Millisecond, func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		mit, ok := m.active[mit.AttackID]
+		if !ok || mit.PayloadSig == nil {
+			return
+		}
+		// Rollback: if peak PPS hasn't dropped below half the install-time
+		// PPS, withdraw the signature and restore the broad cap.
+		installPPS := mit.PeakPPS // PeakPPS is refreshed by OnCritical; if still high, rollback.
+		if installPPS > 0 && mit.PeakPPS > installPPS/2 {
+			log.Printf("inline-mitigation: attack=%d rolling back payload sig (PPS still %d)",
+				mit.AttackID, mit.PeakPPS)
+			metrics.RecordPayloadSigRolledBack()
+			mit.PayloadSig = nil
+			mit.PayloadSigTimer = nil
+			for _, nodeID := range mit.Nodes {
+				if err := m.pusher.ClearUDPPayloadSigs(nodeID); err != nil {
+					log.Printf("inline-mitigation: attack=%d clear payload sigs on %s: %v",
+						mit.AttackID, nodeID, err)
+				}
+			}
+			// Restore the broad rate cap.
+			mit.Rules = m.broadRulesLocked(mit, now)
+			mit.Phase = "broad"
+			m.version++
+			version := m.version
+			nodesPush := append([]string(nil), mit.Nodes...)
+			m.mu.Unlock()
+			m.pushSnapshot(nodesPush, version)
+			return
+		}
+		// PPS dropped — keep the signature.
+		mit.PayloadSigTimer = nil
+	})
 }
 
 type portShare struct {

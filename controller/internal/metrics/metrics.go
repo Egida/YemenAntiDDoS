@@ -144,6 +144,46 @@ var ActionQueueEvents = prometheus.NewCounterVec(
 	[]string{"outcome"}, // full | drain_timeout
 )
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Feature A & B — inline scrubbing / DNS defense metrics
+// ─────────────────────────────────────────────────────────────────────────────
+
+// InlinePayloadSigInstalled counts dynamic UDP payload signatures installed
+// on nodes (Feature A: zero-day UDP payload byte-offset signatures).
+var InlinePayloadSigInstalled = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Name: "xsight_inline_payload_sig_installed_total",
+		Help: "Total UDP payload byte-offset signatures installed on inline nodes.",
+	},
+)
+
+// InlinePayloadSigRolledBack counts payload signatures auto-withdrawn due to
+// insufficient PPS reduction (Feature A auto-rollback).
+var InlinePayloadSigRolledBack = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Name: "xsight_inline_payload_sig_rolled_back_total",
+		Help: "Total UDP payload signatures auto-rolled back due to insufficient PPS reduction.",
+	},
+)
+
+// DNSTXIDDrops counts unsolicited DNS responses dropped due to no matching
+// outbound TXID (Feature B: DNS TXID validation).
+var DNSTXIDDrops = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Name: "xsight_dns_txid_drops_total",
+		Help: "Total unsolicited DNS responses dropped (no matching outbound TXID).",
+	},
+)
+
+// DNSTortureZones is a gauge of parent zones currently flagged for DNS Water
+// Torture (NXDOMAIN ratio + high-entropy subdomains).
+var DNSTortureZones = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Name: "xsight_dns_water_torture_zones",
+		Help: "Current parent zones flagged for DNS Water Torture (NXDOMAIN / random-subdomain).",
+	},
+)
+
 // ScheduledActionsRecovered counts outcomes of the startup reconciliation
 // for persisted scheduled_actions rows. A non-zero rate of
 // outcome="overdue_fired" after restart is the expected tail of the v1.2
@@ -166,6 +206,26 @@ var ScheduledActionsRecovered = prometheus.NewCounterVec(
 // strings already written to action_execution_log.
 func RecordAction(actionType, status string) {
 	ActionExecutions.WithLabelValues(actionType, status).Inc()
+}
+
+// RecordPayloadSigInstalled increments xsight_inline_payload_sig_installed_total.
+func RecordPayloadSigInstalled() {
+	InlinePayloadSigInstalled.Inc()
+}
+
+// RecordPayloadSigRolledBack increments xsight_inline_payload_sig_rolled_back_total.
+func RecordPayloadSigRolledBack() {
+	InlinePayloadSigRolledBack.Inc()
+}
+
+// RecordDNSTXIDDrop increments xsight_dns_txid_drops_total.
+func RecordDNSTXIDDrop() {
+	DNSTXIDDrops.Inc()
+}
+
+// SetDNSTortureZones sets xsight_dns_water_torture_zones gauge.
+func SetDNSTortureZones(n int) {
+	DNSTortureZones.Set(float64(n))
 }
 
 // RecordSkip increments xsight_action_skip_total for the given skip_reason.
@@ -395,6 +455,19 @@ func Register(reg prometheus.Registerer, s store.Store, t *tracker.Tracker) erro
 		return err
 	}
 	if err := reg.Register(ScheduledActionsRecovered); err != nil {
+		return err
+	}
+	// Feature A & B inline / DNS defense counters
+	if err := reg.Register(InlinePayloadSigInstalled); err != nil {
+		return err
+	}
+	if err := reg.Register(InlinePayloadSigRolledBack); err != nil {
+		return err
+	}
+	if err := reg.Register(DNSTXIDDrops); err != nil {
+		return err
+	}
+	if err := reg.Register(DNSTortureZones); err != nil {
 		return err
 	}
 	// State-table gauges (one query per scrape per collector)

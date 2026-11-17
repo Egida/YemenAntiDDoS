@@ -19,6 +19,9 @@ export interface PostureRow {
   burst_alerts: number
   redirect_ok: number
   redirect_err: number
+  dns_txid_drops?: number
+  payload_sig_drops?: number
+  payload_sig_pass?: number
   af_xdp_active: boolean
   af_xdp_umem_drops: number
   af_xdp_rx: number

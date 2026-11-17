@@ -30,6 +30,8 @@ func (p *fakeInlinePusher) PushInlineRules(nodeID string, rules *pb.InlineRuleSe
 	p.lastLen = len(rules.GetRules())
 	return nil
 }
+func (p *fakeInlinePusher) PushUDPPayloadSig(nodeID, dstIP string, sig *action.UDPPayloadSig) error { return nil }
+func (p *fakeInlinePusher) ClearUDPPayloadSigs(nodeID string) error                                  { return nil }
 func (p *fakeInlinePusher) ConnectedInlineNodes() []string { return p.nodes }
 func (p *fakeInlinePusher) AFXDPActive(nodeID string) bool { return false }
 

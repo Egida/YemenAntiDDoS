@@ -217,6 +217,9 @@ func (p *inlinePosture) snapshot() *pb.NodePosture {
 		BurstAlerts:         p.burstAlerts.Load(),
 		RedirectOk:          st.RedirectOK,
 		RedirectErr:         st.RedirectErr,
+		DnsTxidDrops:        st.DNSTXIDDrops,
+		PayloadSigDrops:     st.PayloadSigDrop,
+		PayloadSigPass:      st.PayloadSigPass,
 		CleanpipeEgress:     p.egress,
 		CpuUtil:             p.cpuUtilDelta(),
 	}

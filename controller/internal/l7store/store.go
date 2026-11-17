@@ -97,12 +97,14 @@ type bucket struct {
 
 // Store is a concurrency-safe ring of L7 events plus a per-bucket time series.
 type Store struct {
-	mu          sync.Mutex
-	maxEvents   int
-	maxTargets  int
-	maxSeries   int
-	bucketWidth time.Duration
-	seriesSpan  time.Duration
+	mu                 sync.Mutex
+	maxEvents          int
+	maxTargets         int
+	maxSeries          int
+	maxSnapshotTargets int
+	maxSnapshotTopN    int
+	bucketWidth        time.Duration
+	seriesSpan         time.Duration
 
 	events  []Event
 	targets map[string]*Target
@@ -115,24 +117,80 @@ type Store struct {
 	dropped uint64
 }
 
-// New builds a Store. maxEvents bounds the recent-event ring; a zero or
-// negative value selects 5000.
-func New(maxEvents int) *Store {
-	if maxEvents <= 0 {
-		maxEvents = 5000
+// Config controls the Store's in-memory bounds.
+type Config struct {
+	// MaxEvents bounds the recent-event ring; zero selects 5000.
+	MaxEvents int
+	// MaxTargets bounds distinct destinations tracked; zero selects 512.
+	MaxTargets int
+	// MaxSeries bounds time-series buckets; zero selects 240.
+	MaxSeries int
+	// MaxSnapshotTargets caps targets returned in Snapshot; zero selects 25.
+	MaxSnapshotTargets int
+	// MaxSnapshotTopN caps top-N lists (sources, nodes, JA3, JA4, UA); zero selects 25 (15 for fingerprints).
+	MaxSnapshotTopN int
+	// BucketWidth is the time-series bucket width; zero selects 1 minute.
+	BucketWidth time.Duration
+	// SeriesSpan is the time-series retention window; zero selects 4 hours.
+	SeriesSpan time.Duration
+}
+
+func (c Config) normalize() Config {
+	d := Config{
+		MaxEvents:          5000,
+		MaxTargets:         512,
+		MaxSeries:          240,
+		MaxSnapshotTargets: 25,
+		MaxSnapshotTopN:    25,
+		BucketWidth:        time.Minute,
+		SeriesSpan:         4 * time.Hour,
+	}
+	if c.MaxEvents > 0 {
+		d.MaxEvents = c.MaxEvents
+	}
+	if c.MaxTargets > 0 {
+		d.MaxTargets = c.MaxTargets
+	}
+	if c.MaxSeries > 0 {
+		d.MaxSeries = c.MaxSeries
+	}
+	if c.MaxSnapshotTargets > 0 {
+		d.MaxSnapshotTargets = c.MaxSnapshotTargets
+	}
+	if c.MaxSnapshotTopN > 0 {
+		d.MaxSnapshotTopN = c.MaxSnapshotTopN
+	}
+	if c.BucketWidth > 0 {
+		d.BucketWidth = c.BucketWidth
+	}
+	if c.SeriesSpan > 0 {
+		d.SeriesSpan = c.SeriesSpan
+	}
+	return d
+}
+
+// New builds a Store. A zero Config yields defaults; maxEvents bounds the
+// recent-event ring (zero selects 5000).
+func New(cfg ...Config) *Store {
+	c := Config{}.normalize()
+	if len(cfg) > 0 {
+		c = cfg[0].normalize()
 	}
 	return &Store{
-		maxEvents:   maxEvents,
-		maxTargets:  512,
-		maxSeries:   240,
-		bucketWidth: time.Minute,
-		seriesSpan:  4 * time.Hour,
-		targets:     make(map[string]*Target),
-		sources:     make(map[string]uint64),
-		nodes:       make(map[string]uint64),
-		ja3:         make(map[string]uint64),
-		ja4:         make(map[string]uint64),
-		uas:         make(map[string]uint64),
+		mu:                 sync.Mutex{},
+		maxEvents:          c.MaxEvents,
+		maxTargets:         c.MaxTargets,
+		maxSeries:          c.MaxSeries,
+		maxSnapshotTargets: c.MaxSnapshotTargets,
+		maxSnapshotTopN:    c.MaxSnapshotTopN,
+		bucketWidth:        c.BucketWidth,
+		seriesSpan:         c.SeriesSpan,
+		targets:            make(map[string]*Target),
+		sources:            make(map[string]uint64),
+		nodes:              make(map[string]uint64),
+		ja3:                make(map[string]uint64),
+		ja4:                make(map[string]uint64),
+		uas:                make(map[string]uint64),
 	}
 }
 
@@ -149,18 +207,25 @@ const (
 // share the stream but must never be stored as L7 records.
 func IsL7Type(eventType string) bool {
 	t := strings.ToLower(eventType)
-	return strings.Contains(t, "slowloris") || strings.Contains(t, "tls") || strings.Contains(t, "http")
+	switch t {
+	case l7.DecoderHTTPFlood, l7.DecoderTLSAnomaly, l7.DecoderSlowloris,
+		KindHTTPFlood, KindTLSAnomaly, KindSlowloris:
+		return true
+	}
+	return strings.HasPrefix(t, "l7_")
 }
 
 func kindOf(eventType string) string {
 	t := strings.ToLower(eventType)
-	switch {
-	case strings.Contains(t, "slowloris"):
-		return KindSlowloris
-	case strings.Contains(t, "tls"):
-		return KindTLSAnomaly
-	case strings.Contains(t, "http"):
+	switch t {
+	case l7.DecoderHTTPFlood:
 		return KindHTTPFlood
+	case l7.DecoderTLSAnomaly:
+		return KindTLSAnomaly
+	case l7.DecoderSlowloris:
+		return KindSlowloris
+	case KindHTTPFlood, KindTLSAnomaly, KindSlowloris:
+		return t
 	default:
 		return eventType
 	}
@@ -407,15 +472,15 @@ func (s *Store) Snapshot(window time.Duration, now time.Time) Snapshot {
 		}
 		return snap.Targets[i].DstIP < snap.Targets[j].DstIP
 	})
-	if len(snap.Targets) > 25 {
-		snap.Targets = snap.Targets[:25]
+	if len(snap.Targets) > s.maxSnapshotTargets {
+		snap.Targets = snap.Targets[:s.maxSnapshotTargets]
 	}
 
-	snap.Sources = topCounters(s.sources, 25)
-	snap.Nodes = topCounters(s.nodes, 25)
-	snap.JA3 = topCounters(s.ja3, 15)
-	snap.JA4 = topCounters(s.ja4, 15)
-	snap.UserAgents = topCounters(s.uas, 15)
+	snap.Sources = topCounters(s.sources, s.maxSnapshotTopN)
+	snap.Nodes = topCounters(s.nodes, s.maxSnapshotTopN)
+	snap.JA3 = topCounters(s.ja3, s.maxSnapshotTopN)
+	snap.JA4 = topCounters(s.ja4, s.maxSnapshotTopN)
+	snap.UserAgents = topCounters(s.uas, s.maxSnapshotTopN)
 	return snap
 }
 

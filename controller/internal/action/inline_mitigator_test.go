@@ -19,10 +19,19 @@ type recordingPusher struct {
 	// noXSK marks nodes whose posture reports no AF_XDP socket; challenge
 	// rules must be withheld from them at push time.
 	noXSK map[string]bool
+	// payloadSigs records pushed payload signatures: nodeID -> dstIP -> sig
+	payloadSigs map[string]map[string]*UDPPayloadSig
+	// clearedNodes records nodes on which ClearUDPPayloadSigs was called.
+	clearedNodes map[string]bool
 }
 
 func newRecordingPusher(nodes ...string) *recordingPusher {
-	return &recordingPusher{byNode: make(map[string][]*pb.InlineRuleSet), nodes: nodes}
+	return &recordingPusher{
+		byNode:        make(map[string][]*pb.InlineRuleSet),
+		nodes:         nodes,
+		payloadSigs:   make(map[string]map[string]*UDPPayloadSig),
+		clearedNodes:  make(map[string]bool),
+	}
 }
 
 func (p *recordingPusher) PushInlineRules(nodeID string, rules *pb.InlineRuleSet) error {
@@ -45,6 +54,27 @@ func (p *recordingPusher) AFXDPActive(nodeID string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return !p.noXSK[nodeID]
+}
+
+func (p *recordingPusher) PushUDPPayloadSig(nodeID, dstIP string, sig *UDPPayloadSig) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.fail {
+		return errPush
+	}
+	if p.payloadSigs[nodeID] == nil {
+		p.payloadSigs[nodeID] = make(map[string]*UDPPayloadSig)
+	}
+	p.payloadSigs[nodeID][dstIP] = sig
+	return nil
+}
+
+func (p *recordingPusher) ClearUDPPayloadSigs(nodeID string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.clearedNodes[nodeID] = true
+	delete(p.payloadSigs, nodeID)
+	return nil
 }
 
 func (p *recordingPusher) last(nodeID string) *pb.InlineRuleSet {

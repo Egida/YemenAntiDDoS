@@ -26,6 +26,8 @@ type Rule struct {
 	Name string
 	// Prefix is the destination prefix, e.g. 198.51.100.7/32. Required.
 	Prefix string
+	// SrcPrefix is the optional source prefix match component (RFC 8955 type 2).
+	SrcPrefix string
 	// Protocol is the IP protocol number (6=TCP, 17=UDP); nil omits the match.
 	Protocol *uint8
 	// DstPort / SrcPort are TCP/UDP ports; nil omits the match.
@@ -68,6 +70,9 @@ func (r Rule) action() Action {
 // Describe renders a human-readable match tuple for logs and the console.
 func Describe(r Rule) string {
 	parts := []string{"destination " + r.Prefix}
+	if r.SrcPrefix != "" {
+		parts = append(parts, "source "+r.SrcPrefix)
+	}
 	if r.Protocol != nil {
 		parts = append(parts, "protocol "+protoName(*r.Protocol))
 	}

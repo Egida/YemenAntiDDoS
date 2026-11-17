@@ -284,6 +284,7 @@ func bgpAnnounce(ctx context.Context, s store.Store, engine *Engine, conn *store
 	if mErr := s.BGPAnnouncements().MarkAnnounced(ctx, attachResult.AnnouncementID, attachResult.Gen); bgpStateNotApplied(mErr, attachResult.AnnouncementID, attachResult.Gen, "announced") {
 		detail += "; " + bgpNotAppliedDetail
 	} else if mErr != nil {
+		detail += "; state write failed: " + mErr.Error()
 		log.Printf("action: bgp MarkAnnounced announcement_id=%d: %v", attachResult.AnnouncementID, mErr)
 	}
 	log.Printf("action: bgp announce %s connector=%s announcement_id=%d",

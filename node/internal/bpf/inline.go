@@ -35,6 +35,7 @@ const (
 	CfgDNSProtect      uint32 = 11
 	CfgInlineSample    uint32 = 12
 	CfgEgressSaddr     uint32 = 13
+	CfgUDPPayloadSigs  uint32 = 14
 )
 
 // Filter actions (FILTER_ACTION_* in xsight.h).
@@ -424,6 +425,9 @@ type InlineStats struct {
 	EmergencyDrops    uint64
 	FilterDrops       uint64
 	DNSDrops          uint64
+	DNSTXIDDrops      uint64
+	PayloadSigDrop    uint64
+	PayloadSigPass    uint64
 	RedirectOK        uint64
 	RedirectErr       uint64
 	XSKSteered        uint64
@@ -541,7 +545,6 @@ func pruneMap[K comparable](name string, mp *ebpf.Map, desired map[K]struct{}) e
 	}
 	return nil
 }
-
 
 // clearExactMap clears a hash map keyed by FilterRuleKey.
 func clearExactMap(m *ebpf.Map) error {
@@ -676,6 +679,59 @@ func (m *Manager) SetDNSProtect(on bool) error {
 	return m.SetConfig(CfgDNSProtect, v)
 }
 
+// SetUDPPayloadSigsEnabled toggles the UDP payload signature engine
+// (CFG_UDP_PAYLOAD_SIGS).
+func (m *Manager) SetUDPPayloadSigsEnabled(on bool) error {
+	var v uint64
+	if on {
+		v = 1
+	}
+	return m.SetConfig(CfgUDPPayloadSigs, v)
+}
+
+// SetUDPPayloadSig installs or updates a UDP payload signature for a
+// destination IP. The signature is matched against the first 64 bytes of UDP
+// payload at the configured offset; on match the data plane applies sig.Action.
+func (m *Manager) SetUDPPayloadSig(dstIP net.IP, sig *UDPPayloadSigValue) error {
+	if m.Objs == nil {
+		return fmt.Errorf("bpf: not loaded")
+	}
+	ip4 := dstIP.To4()
+	if ip4 == nil {
+		return fmt.Errorf("bpf: udp_payload_sigs accepts IPv4 only")
+	}
+	var key UDPPayloadSigKey
+	copy(key[:4], ip4)
+	if err := m.Objs.UdpPayloadSigs.Update(&key, sig, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("bpf: set udp payload sig: %w", err)
+	}
+	return nil
+}
+
+// ClearUDPPayloadSigs removes all UDP payload signatures (used on rollback).
+func (m *Manager) ClearUDPPayloadSigs() error {
+	if m.Objs == nil {
+		return fmt.Errorf("bpf: not loaded")
+	}
+	var keys []UDPPayloadSigKey
+	var k UDPPayloadSigKey
+	var v UDPPayloadSigValue
+	iter := m.Objs.UdpPayloadSigs.Iterate()
+	for iter.Next(&k, &v) {
+		keys = append(keys, k)
+	}
+	if err := iter.Err(); err != nil {
+		return fmt.Errorf("bpf: iterate udp_payload_sigs: %w", err)
+	}
+	for _, k := range keys {
+		k := k
+		if err := m.Objs.UdpPayloadSigs.Delete(&k); err != nil {
+			return fmt.Errorf("bpf: delete udp payload sig: %w", err)
+		}
+	}
+	return nil
+}
+
 // SetAlertsEnabled controls burst-alert ringbuf emission. Array-map slots
 // default to zero (the cfg_read default is never used), so userspace must
 // write an explicit 1 when the ringbuf path is available.
@@ -718,6 +774,9 @@ func (m *Manager) InlineCounters() InlineStats {
 	out.EmergencyDrops = read(3)
 	out.FilterDrops = read(4)
 	out.DNSDrops = read(5)
+	out.DNSTXIDDrops = read(12)
+	out.PayloadSigDrop = read(10)
+	out.PayloadSigPass = read(11)
 	out.RedirectOK = read(6)
 	out.RedirectErr = read(7)
 	out.XSKSteered = read(8)

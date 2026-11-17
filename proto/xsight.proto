@@ -310,6 +310,9 @@ message NodePosture {
   uint64 redirect_ok = 15;         // successful clean-pipe XDP_REDIRECT verdicts
   uint64 redirect_err = 16;        // redirect failures that fell back to XDP_DROP
   repeated double cpu_util = 17;   // per-core CPU utilisation (%) since previous report
+  uint64 dns_txid_drops = 18;      // unsolicited DNS responses dropped (no TXID match)
+  uint64 payload_sig_drops = 19;   // UDP payload signature matches → XDP_DROP
+  uint64 payload_sig_pass = 20;    // UDP payload signature matches → sampled/PASS
 }
 
 // v3.0: Flow listener + source config pushed to Flow Nodes

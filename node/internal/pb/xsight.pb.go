@@ -2031,6 +2031,9 @@ type NodePosture struct {
 	RedirectOk          uint64                 `protobuf:"varint,15,opt,name=redirect_ok,json=redirectOk,proto3" json:"redirect_ok,omitempty"`                             // successful clean-pipe XDP_REDIRECT verdicts
 	RedirectErr         uint64                 `protobuf:"varint,16,opt,name=redirect_err,json=redirectErr,proto3" json:"redirect_err,omitempty"`                          // redirect failures that fell back to XDP_DROP
 	CpuUtil             []float64              `protobuf:"fixed64,17,rep,packed,name=cpu_util,json=cpuUtil,proto3" json:"cpu_util,omitempty"`                              // per-core CPU utilisation (%) since previous report
+	DnsTxidDrops        uint64                 `protobuf:"varint,18,opt,name=dns_txid_drops,json=dnsTxidDrops,proto3" json:"dns_txid_drops,omitempty"`                     // unsolicited DNS responses dropped (no TXID match)
+	PayloadSigDrops     uint64                 `protobuf:"varint,19,opt,name=payload_sig_drops,json=payloadSigDrops,proto3" json:"payload_sig_drops,omitempty"`            // UDP payload signature matches → XDP_DROP
+	PayloadSigPass      uint64                 `protobuf:"varint,20,opt,name=payload_sig_pass,json=payloadSigPass,proto3" json:"payload_sig_pass,omitempty"`               // UDP payload signature matches → sampled/PASS
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache
 }
@@ -2182,6 +2185,27 @@ func (x *NodePosture) GetCpuUtil() []float64 {
 		return x.CpuUtil
 	}
 	return nil
+}
+
+func (x *NodePosture) GetDnsTxidDrops() uint64 {
+	if x != nil {
+		return x.DnsTxidDrops
+	}
+	return 0
+}
+
+func (x *NodePosture) GetPayloadSigDrops() uint64 {
+	if x != nil {
+		return x.PayloadSigDrops
+	}
+	return 0
+}
+
+func (x *NodePosture) GetPayloadSigPass() uint64 {
+	if x != nil {
+		return x.PayloadSigPass
+	}
+	return 0
 }
 
 // v3.0: Flow listener + source config pushed to Flow Nodes
@@ -2656,7 +2680,7 @@ const file_xsight_proto_rawDesc = "" +
 	"afXdpQueue\x12'\n" +
 	"\x10af_xdp_zero_copy\x18\x04 \x01(\bR\rafXdpZeroCopy\x12\"\n" +
 	"\raf_xdp_frames\x18\x05 \x01(\rR\vafXdpFrames\x12\x19\n" +
-	"\bcpu_pins\x18\x06 \x03(\x03R\acpuPins\"\x8b\x05\n" +
+	"\bcpu_pins\x18\x06 \x03(\x03R\acpuPins\"\x87\x06\n" +
 	"\vNodePosture\x12\x19\n" +
 	"\bxdp_mode\x18\x01 \x01(\tR\axdpMode\x12%\n" +
 	"\x0einline_enabled\x18\x02 \x01(\bR\rinlineEnabled\x12!\n" +
@@ -2676,7 +2700,10 @@ const file_xsight_proto_rawDesc = "" +
 	"\vredirect_ok\x18\x0f \x01(\x04R\n" +
 	"redirectOk\x12!\n" +
 	"\fredirect_err\x18\x10 \x01(\x04R\vredirectErr\x12\x19\n" +
-	"\bcpu_util\x18\x11 \x03(\x01R\acpuUtil\"\xae\x01\n" +
+	"\bcpu_util\x18\x11 \x03(\x01R\acpuUtil\x12$\n" +
+	"\x0edns_txid_drops\x18\x12 \x01(\x04R\fdnsTxidDrops\x12*\n" +
+	"\x11payload_sig_drops\x18\x13 \x01(\x04R\x0fpayloadSigDrops\x12(\n" +
+	"\x10payload_sig_pass\x18\x14 \x01(\x04R\x0epayloadSigPass\"\xae\x01\n" +
 	"\x12FlowListenerConfig\x12%\n" +
 	"\x0elisten_address\x18\x01 \x01(\tR\rlistenAddress\x12#\n" +
 	"\rprotocol_mode\x18\x02 \x01(\tR\fprotocolMode\x122\n" +

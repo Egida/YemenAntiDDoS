@@ -82,6 +82,18 @@ inline:
   cleanpipe_egress: ""           # egress ifname for clean-pipe redirect ("" = same-interface XDP_TX)
   cleanpipe_encap: ""            # "" | "gre"; geneve is not supported. GRE uses this iface's IPv4 as outer saddr
 
+  # Feature A: Dynamic UDP payload byte-offset signatures (zero-day UDP floods
+  # without a dominant src_port). Enabled only when the narrow phase finds no
+  # dominant port; auto-withdrawn on rollback if PPS doesn't drop.
+  udp_payload_sigs: false        # master switch for payload signature engine
+  udp_payload_sig_action: "drop" # "drop" | "rate_limit" — action on signature match
+
+  # Feature B: DNS Water Torture & unsolicited response inspection
+  dns_tx_validate: true          # drop unsolicited DNS responses (no matching outbound TXID)
+  dns_water_torture: true        # enable random-subdomain / NXDOMAIN Water Torture detection
+  dns_water_torture_nx_ratio: 0.40   # NXDOMAIN ratio threshold (>40% = attack)
+  dns_water_torture_entropy: 3.5     # Shannon entropy threshold for random labels
+
 # Hardware acceleration / OS tuning (optional).
 perf:
   cpu_pins: []                   # e.g. [2, 3]; pins the XDP/AF_XDP hot goroutines to these cores

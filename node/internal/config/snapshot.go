@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"time"
 )
+
 // SnapshotPrefix is a single watched prefix from the Controller.
 type SnapshotPrefix struct {
 	Prefix string `json:"prefix"` // CIDR notation, e.g. "10.2.0.0/24"

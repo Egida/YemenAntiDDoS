@@ -108,16 +108,7 @@ export function createServer(data: Dataset = createData()): Server {
       return send({ error: 'username and password required' }, 400)
     }
     if (method !== 'GET') {
-      if (method === 'PUT' && path === '/api/settings/bgp-instance' && body && typeof body === 'object') {
-        const cur = data.bgpInstance?.instance || { local_asn: 65000, router_id: '192.0.2.10', listen_port: 179, rtbh_next_hop: '' }
-        const next = { ...cur }
-        if (typeof body.local_asn === 'number') next.local_asn = body.local_asn
-        if (typeof body.router_id === 'string') next.router_id = body.router_id
-        if (typeof body.listen_port === 'number') next.listen_port = body.listen_port
-        if (typeof body.rtbh_next_hop === 'string') next.rtbh_next_hop = body.rtbh_next_hop
-        data.bgpInstance = { configured: true, instance: next, speaker_running: data.bgpInstance?.speaker_running ?? true }
-        return send({ ok: true, restart_required: true, note: 'instance identity changes take effect after controller restart' })
-      }
+      // All write endpoints are admin-only in the demo.
       return send({ error: 'admin role required' }, 403)
     }
     const number = (key: string, fallback: number) => q.has(key) ? Number(q.get(key)) : fallback
@@ -252,7 +243,11 @@ export function createServer(data: Dataset = createData()): Server {
       syn_cookies_replied: n.id === 'probe-a' ? 10 : 3, syn_cookies_validated: n.id === 'probe-a' ? 8 : 3,
       syn_cookies_dropped: n.id === 'probe-a' ? 1 : 0, emergency_drops: n.id === 'probe-a' ? 4 : 0,
       burst_alerts: n.id === 'probe-a' ? 7 : 1, redirect_ok: n.id === 'probe-a' ? 99 : 0,
-      redirect_err: n.id === 'probe-a' ? 2 : 0, af_xdp_active: n.id === 'probe-a',
+      redirect_err: n.id === 'probe-a' ? 2 : 0,
+      dns_txid_drops: n.id === 'probe-a' ? 42 : 5,
+      payload_sig_drops: n.id === 'probe-a' ? 18340 : 0,
+      payload_sig_pass: n.id === 'probe-a' ? 128 : 0,
+      af_xdp_active: n.id === 'probe-a',
       af_xdp_rx: n.id === 'probe-a' ? 1234 : 0, af_xdp_umem_drops: 0,
       cpu_pins: n.id === 'probe-a' ? [2, 3] : [2], cpu_util: n.id === 'probe-a' ? [12.4, 3.6] : [4.1],
       cleanpipe_egress: n.id === 'probe-a' ? 'eth1' : '', updated_at: n.last_stats_at })
@@ -289,8 +284,20 @@ export function createServer(data: Dataset = createData()): Server {
           EgressIfindex: 0, Encap: '', Reason: 'broad:attack=' + a.id }],
         StartedAt: a.started_at, NarrowedAt: a.started_at, PeakPPS: a.peak_pps,
         Rebreadths: 0, Version: 7 }
-      return send({ enabled: true, active: a.ended_at ? 0 : 1, pushes: 18, push_errors: 0,
-        mitigations: [mitigation] })
+      const udpSigAttack = data.attacks.find(x => x.decoder_family === 'udp')
+      const sigMitigation = udpSigAttack ? {
+        AttackID: udpSigAttack.id + 1000, TargetIP: udpSigAttack.dst_ip, Decoder: 'udp',
+        EventType: 'udp_flood_payload_sig', Nodes: udpSigAttack.node_sources, Phase: 'narrow',
+        Rules: [{ ID: 9, DstIP: udpSigAttack.dst_ip, DstPrefixLen: 32, SrcIP: '', SrcPrefixLen: 0,
+          Protocol: 17, DstPort: 0, SrcPort: 0, Action: 'rate_limit', RateLimitPPS: 20000, Priority: 90,
+          ExpiresUnix: Math.floor(Date.parse(udpSigAttack.started_at) / 1000) + 600,
+          EgressIfindex: 0, Encap: '', Reason: 'broad:payload-sig=' + udpSigAttack.id }],
+        PayloadSig: { Offset: 4, Len: 8, Pattern: '0x4141414141414141', Mask: '0xffffffffffffffff', Action: 'drop' },
+        StartedAt: udpSigAttack.started_at, NarrowedAt: udpSigAttack.started_at, PeakPPS: udpSigAttack.peak_pps,
+        Rebreadths: 0, Version: 3,
+      } : null
+      const list = [mitigation, ...(sigMitigation ? [sigMitigation] : [])]
+      return send({ enabled: true, active: list.length, pushes: 21, push_errors: 0, mitigations: list })
     }
     const nodePath = /^\/api\/nodes\/([^/]+)(\/status)?$/.exec(path)
     if (nodePath) {
@@ -372,7 +379,7 @@ export function createServer(data: Dataset = createData()): Server {
     if (path === '/api/settings/bgp-instance') return send(data.bgpInstance)
     if (path === '/api/bgp/peers') return send({ peers: data.bgpPeers, speaker_running: !!data.bgpInstance?.speaker_running })
     if (path === '/api/l7/summary') return send({ generated_at: new Date().toISOString(), window_minutes: 5, bucket_seconds: 60,
-      totals: { 'l7_http_flood': 0, 'l7_tls_clienthello': 0, 'l7_slowloris': 0 }, rates: {}, series: [], targets: [],
+      totals: { 'l7_http_flood': 0, 'l7_tls_anomaly': 0, 'l7_slowloris': 0 }, rates: {}, series: [], targets: [],
       sources: [], nodes: [], recent: [], dropped: 0 })
     if (path === '/api/l7/events') return send({ events: [], buffered: 0, total_dropped: 0 })
     if (/^\/api\/nodes\/[^/]+\/tls$/.test(path)) return send({ server: { min_version: 'TLS 1.3', expires_at: new Date(Date.now()+86400000).toISOString(),

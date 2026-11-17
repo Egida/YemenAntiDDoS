@@ -131,10 +131,12 @@ func (s *GobgpSpeaker) Start(_ context.Context) error {
 // not used (see Start).
 func (s *GobgpSpeaker) Stop(_ context.Context) error {
 	s.stop.Do(func() { close(s.stopCh) })
-	srv := s.server()
-	if srv != nil {
-		srv.Stop()
+	s.mu.Lock()
+	if s.srv != nil {
+		s.srv.Stop()
+		s.srv = nil
 	}
+	s.mu.Unlock()
 	return nil
 }
 
@@ -271,6 +273,9 @@ func (s *GobgpSpeaker) SyncPeers(ctx context.Context, peers []Peer) error {
 func (s *GobgpSpeaker) PeerStates(ctx context.Context) []PeerState {
 	cctx, cancel := context.WithTimeout(ctx, speakerTimeout)
 	defer cancel()
+	if s.server() == nil {
+		return nil
+	}
 	s.peersMu.RLock()
 	byAddr := map[string]Peer{}
 	for _, p := range s.peers {
@@ -311,6 +316,9 @@ func (s *GobgpSpeaker) pollLoop() {
 // gobgp's ListPath API never populates path UUIDs, so a polled count cannot
 // distinguish locally-originated paths from learned ones.
 func (s *GobgpSpeaker) pollOnce() {
+	if s.server() == nil {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), speakerTimeout)
 	defer cancel()
 	current := map[string]bool{} // exported label pairs, "conn|neighbor"

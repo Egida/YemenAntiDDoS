@@ -420,7 +420,7 @@ func main() {
 
 	// Layer-7 aggregation: bounded in-memory view of HTTP flood, Slowloris and
 	// TLS ClientHello events reported by Nodes over CriticalEventStream.
-	l7Store := l7store.New(5000)
+	l7Store := l7store.New(l7store.Config{MaxEvents: 5000})
 
 	onCritical := func(nodeID string, event *pb.CriticalEvent) {
 		log.Printf("critical: node=%s type=%s dst=%v",

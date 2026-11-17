@@ -208,8 +208,12 @@ func (c *Collector) Observe(srcIP, dstIP net.IP, srcPort, dstPort uint16, tcpFla
 	key := dstIP.String()
 	src := srcIP.String()
 
-	isHTTP := httpPort(dstPort) || looksHTTP(payload)
 	isTLS := tlsPort(dstPort) || payload[0] == 0x16
+	isHTTP := httpPort(dstPort) || looksHTTP(payload)
+	// slowlorisCandidate covers non-TLS payloads that don't (yet) look like
+	// HTTP: byte-drip attacks on non-standard ports send single-byte fragments
+	// that never match looksHTTP (needs 4+ bytes) or the HTTP port list.
+	slowlorisCandidate := !isTLS && len(payload) > 0
 
 	var req l7.HTTPRequest
 	var reqOK bool
@@ -225,7 +229,7 @@ func (c *Collector) Observe(srcIP, dstIP net.IP, srcPort, dstPort uint16, tcpFla
 	}
 	// A byte-drip fragment never parses as a request line; slowloris
 	// detection must still accumulate it (raw bytes per 5-tuple).
-	if !reqOK && !helloOK && !isHTTP {
+	if !reqOK && !helloOK && !isHTTP && !slowlorisCandidate {
 		return
 	}
 
@@ -244,7 +248,7 @@ func (c *Collector) Observe(srcIP, dstIP net.IP, srcPort, dstPort uint16, tcpFla
 	b.uniqueSrc[src] = struct{}{}
 	c.samples.Add(1)
 
-	if isHTTP {
+	if isHTTP || slowlorisCandidate {
 		// Complete requests mark the state completed; incomplete and
 		// unparseable fragments accumulate toward the slowloris flag.
 		c.observeSlow(src, key, dstPort, payload, at, b)

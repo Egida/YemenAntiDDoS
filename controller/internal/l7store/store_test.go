@@ -8,7 +8,7 @@ import (
 )
 
 func TestObserveAndSnapshot(t *testing.T) {
-	s := New(10)
+	s := New(Config{MaxEvents: 10})
 	now := time.Now()
 
 	s.Observe("node-1", now.Add(-30*time.Second), "l7_http_flood", "198.51.100.7", map[string]uint64{
@@ -61,7 +61,7 @@ func TestObserveAndSnapshot(t *testing.T) {
 }
 
 func TestWindowFiltersOldEvents(t *testing.T) {
-	s := New(10)
+	s := New(Config{MaxEvents: 10})
 	now := time.Now()
 	s.Observe("node-1", now.Add(-2*time.Hour), "l7_http_flood", "198.51.100.7", nil)
 
@@ -75,7 +75,7 @@ func TestWindowFiltersOldEvents(t *testing.T) {
 }
 
 func TestRingIsBounded(t *testing.T) {
-	s := New(8)
+	s := New(Config{MaxEvents: 8})
 	now := time.Now()
 	for i := 0; i < 50; i++ {
 		s.Observe("node-1", now, "l7_http_flood", "198.51.100.7", nil)
@@ -90,7 +90,7 @@ func TestRingIsBounded(t *testing.T) {
 }
 
 func TestCounterKeysAlignWithCollectorWire(t *testing.T) {
-	s := New(10)
+	s := New(Config{MaxEvents: 10})
 	now := time.Now()
 
 	// Flat counters spelled exactly as the Node collector emits them
@@ -119,7 +119,7 @@ func TestCounterKeysAlignWithCollectorWire(t *testing.T) {
 }
 
 func TestNonL7EventsAreNotStored(t *testing.T) {
-	s := New(10)
+	s := New(Config{MaxEvents: 10})
 	now := time.Now()
 
 	// L3/L4 critical events share the stream with L7 events but must not be

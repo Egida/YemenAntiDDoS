@@ -70,6 +70,19 @@ func encodeFlowspec(rule flowspec.Rule) (key string, nlri bgp.AddrPrefixInterfac
 		family = "fs6"
 		rules = append(rules, bgp.NewFlowSpecDestinationPrefix6(bgp.NewIPv6AddrPrefix(uint8(ones), base), 0))
 	}
+	// Source prefix (RFC 8955 type 2) — optional, same AFI as destination.
+	if rule.SrcPrefix != "" {
+		_, sipNet, serr := parsePrefix(rule.SrcPrefix)
+		if serr != nil {
+			return "", nil, nil, serr
+		}
+		sOnes, _ := sipNet.Mask.Size()
+		if ip.To4() != nil {
+			rules = append(rules, bgp.NewFlowSpecSourcePrefix(bgp.NewIPAddrPrefix(uint8(sOnes), sipNet.IP.String())))
+		} else {
+			rules = append(rules, bgp.NewFlowSpecSourcePrefix6(bgp.NewIPv6AddrPrefix(uint8(sOnes), sipNet.IP.String()), 0))
+		}
+	}
 	if rule.Protocol != nil {
 		rules = append(rules, bgp.NewFlowSpecComponent(bgp.FLOW_SPEC_TYPE_IP_PROTO,
 			[]*bgp.FlowSpecComponentItem{numericItem(uint64(*rule.Protocol))}))
@@ -120,7 +133,7 @@ func encodeFlowspec(rule flowspec.Rule) (key string, nlri bgp.AddrPrefixInterfac
 	// The key deliberately excludes Action/RateLimit: one logical rule per
 	// match tuple, so a rate change updates the existing path's attributes
 	// instead of orphaning the previously announced one.
-	key = fmt.Sprintf("%s|%s|%s|%s|%s", family, ipNet.String(), protoKey(rule), portKey(rule.DstPort), portKey(rule.SrcPort))
+	key = fmt.Sprintf("%s|%s|%s|%s|%s|%s", family, ipNet.String(), protoKey(rule), portKey(rule.DstPort), portKey(rule.SrcPort), srcPrefixKey(rule))
 	return key, nlri, attrs, nil
 }
 
@@ -136,6 +149,13 @@ func portKey(p *uint16) string {
 		return "-"
 	}
 	return fmt.Sprintf("%d", *p)
+}
+
+func srcPrefixKey(r flowspec.Rule) string {
+	if r.SrcPrefix == "" {
+		return "-"
+	}
+	return r.SrcPrefix
 }
 
 // encodeBlackhole builds the RTBH origination: unicast prefix with next-hop

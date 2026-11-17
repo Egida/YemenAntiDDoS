@@ -53,7 +53,7 @@ func TestEncodeFlowspecPlainIPGetsHostMask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("plain IP must encode as /32: %v", err)
 	}
-	if want := "fs4|198.51.100.7/32|-|-|-"; key != want {
+	if want := "fs4|198.51.100.7/32|-|-|-|-"; key != want {
 		t.Fatalf("key = %q, want %q", key, want)
 	}
 }
@@ -126,7 +126,7 @@ func TestEncodeFlowspecIPv6(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	if want := "fs6|2001:db8::1/128|17|-|53"; key != want {
+	if want := "fs6|2001:db8::1/128|17|-|53|-"; key != want {
 		t.Fatalf("key = %q, want %q", key, want)
 	}
 	// Same mandatory Origin + NextHop + ext-communities shape as IPv4.

@@ -22,6 +22,7 @@ func (r *nodePostureRepo) BulkInsert(ctx context.Context, points []store.Posture
 		"filter_rules", "validated_clients",
 		"syn_cookies_replied", "syn_cookies_validated", "syn_cookies_dropped",
 		"emergency_drops", "burst_alerts", "redirect_ok", "redirect_err",
+		"dns_txid_drops", "payload_sig_drops", "payload_sig_pass",
 		"af_xdp_active", "af_xdp_umem_drops", "af_xdp_rx",
 	}
 	rows := make([][]any, len(points))
@@ -31,6 +32,7 @@ func (r *nodePostureRepo) BulkInsert(ctx context.Context, points []store.Posture
 			int64(p.FilterRules), int64(p.ValidatedClients),
 			int64(p.SynCookiesReplied), int64(p.SynCookiesValidated), int64(p.SynCookiesDropped),
 			int64(p.EmergencyDrops), int64(p.BurstAlerts), int64(p.RedirectOk), int64(p.RedirectErr),
+			int64(p.DnsTxidDrops), int64(p.PayloadSigDrops), int64(p.PayloadSigPass),
 			p.AFXDPActive, int64(p.AFXDPUmemDrops), int64(p.AFXDPRX),
 		}
 	}
@@ -79,6 +81,7 @@ func (r *nodePostureRepo) QueryHistory(ctx context.Context, filter store.Posture
 			   max(syn_cookies_replied)::BIGINT, max(syn_cookies_validated)::BIGINT,
 			   max(syn_cookies_dropped)::BIGINT, max(emergency_drops)::BIGINT,
 			   max(burst_alerts)::BIGINT, max(redirect_ok)::BIGINT, max(redirect_err)::BIGINT,
+			   max(dns_txid_drops)::BIGINT, max(payload_sig_drops)::BIGINT, max(payload_sig_pass)::BIGINT,
 			   bool_or(af_xdp_active), max(af_xdp_umem_drops)::BIGINT, max(af_xdp_rx)::BIGINT
 		FROM ts_node_posture%s
 		GROUP BY bucket, node_id
@@ -98,6 +101,7 @@ func (r *nodePostureRepo) QueryHistory(ctx context.Context, filter store.Posture
 			&p.FilterRules, &p.ValidatedClients,
 			&p.SynCookiesReplied, &p.SynCookiesValidated, &p.SynCookiesDropped,
 			&p.EmergencyDrops, &p.BurstAlerts, &p.RedirectOk, &p.RedirectErr,
+			&p.DnsTxidDrops, &p.PayloadSigDrops, &p.PayloadSigPass,
 			&p.AFXDPActive, &p.AFXDPUmemDrops, &p.AFXDPRX); err != nil {
 			return nil, err
 		}

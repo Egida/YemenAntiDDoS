@@ -161,6 +161,8 @@ Key BPF maps (`node/bpf/xsight.h`):
 | `alerts` | ringbuf: urgent burst events read by `CriticalEventStream` |
 | `dns_outstanding` | reflection heuristic for UDP/53 |
 | `dns_volume` | per-client/qtype 100 ms window for ANY / large-TXT amplification |
+| `dns_txid_lru` | LRU of outbound DNS query TXIDs for unsolicited-response drops (Feature B) |
+| `udp_payload_sigs` | dynamic UDP payload byte-offset signatures for zero-day UDP floods (Feature A) |
 | `inline_stats` | per-CPU counters surfaced as node posture |
 | `xsight_xsk` | AF_XDP socket map |
 
@@ -202,7 +204,38 @@ suite pins both a known answer and the standard SipHash-2-4 vectors, so any
 drift between the C and Go sides fails CI.
 
 ---
+## 4a. Feature A — Dynamic UDP Payload Byte-Offset Signatures
 
+When a UDP surge (`decoder=udp`) has no dominant source port (`dominant_src_port_pct < 80%`), the narrow phase samples the first 64 bytes of UDP payload across ~256 attack packets via ringbuf, alongside a clean baseline sample. The Go signature extractor (`node/internal/sigs/`) aligns payloads at L4 offset 0..63, computes per-offset byte frequency, and extracts a contiguous 4-to-8 byte pattern + bitmask where modal bytes appear in `>= 85%` of attack packets and `< 1%` of baseline traffic.
+
+The signature is installed into the BPF `udp_payload_sigs` map keyed by destination IP, containing `{offset, len, pattern, mask, action}`. The XDP data plane uses `bpf_xdp_load_bytes()` at `udp_payload_offset + sig->offset` to load up to 8 bytes, applies `(val & sig->mask) == sig->pattern`, and enforces `XDP_DROP` or rate-limit in O(1) per packet.
+
+Auto-rollback: if PPS fails to drop within 500–750 ms of signature installation, the signature is withdrawn and the broad per-target rate cap is restored. This is gated by `inline.udp_payload_sigs` in `config.example.yaml`.
+
+### False-positive safeguards
+- **Dual-threshold**: signature requires >=85% attack match AND <1% baseline match at every byte position.
+- **Minimum sample**: 256 attack packets required before extraction.
+- **Auto-rollback**: 500–750 ms rollback window restores the broad cap if PPS doesn't drop.
+- **TTL expiry**: all signatures carry the standard rule TTL; controller reconciles on reconnect.
+
+---
+## 4b. Feature B — DNS Water Torture & Unsolicited Response Inspection
+
+### DNS TXID validation (XDP fast path)
+Outbound DNS queries (`QR == 0`) toward watched clients are recorded in the `dns_txid_lru` LRU map keyed by `{client_ip, server_ip, client_port, server_port, txid}`. Inbound DNS responses (`QR == 1`) with no matching TXID are dropped at XDP wire speed as unsolicited (spoofing / Water Torture). Consumed entries are deleted to prevent replay.
+
+### DNS Water Torture detection (AF_XDP userspace)
+When a protected nameserver crosses its DNS query burst threshold, `QR == 0` queries are redirected to the AF_XDP UMEM worker (`XDP_REDIRECT`). The Go DNS analyzer (`node/internal/dns/`) parses QNAME labels in userspace and scores leftmost subdomain labels using Shannon entropy and label length/depth. Per-parent-zone NXDOMAIN ratios are tracked on outbound responses; a zone is flagged for Water Torture when `NXDOMAIN ratio > 40%` AND `high-entropy label ratio > 50%` alongside elevated QPS.
+
+Mitigated zone hashes (FNV-1a of parent domain) or per-source rate limits are pushed back to XDP/AF_XDP mitigation maps, and telemetry is emitted to the Controller via `CriticalEventStream`.
+
+### False-positive safeguards
+- **Dual-condition**: Water Torture requires both high NXDOMAIN ratio (>40%) AND high entropy label ratio (>50%), not either alone.
+- **Minimum queries**: 10 queries per zone before ratio evaluation.
+- **TXID validation**: only drops responses with no matching outstanding query; solicited responses pass normally.
+- **Consumed-entry deletion**: TXID entries are removed on match to prevent replay attacks.
+
+---
 ## 5. Detection timing
 
 | Stage | Budget | Where |

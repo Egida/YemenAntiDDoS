@@ -1401,37 +1401,72 @@ static __always_inline int dns_protect(const __u8 *src16, const __u8 *dst16,
 
     void *dns = (void *)(u + 1);
 
-    if (dport == 53 && src_watched) {
-        // Outbound client query — record (client, id, qtype) for 2s.
-        __u16 qid = 0, qtype = 0;
-        if (dns + 2 <= data_end) {
-            __builtin_memcpy(&qid, dns, 2);
-            qtype = dns_parse_qtype(dns, data_end);
+    // Need at least the 12-byte DNS header to read the TXID and QR bit.
+    if (dns + 12 > data_end)
+        return 0;
+
+    __u16 txid;
+    __builtin_memcpy(&txid, dns, 2);
+    // QR bit is bit 15 of the flags field (bytes 2-3, network byte order).
+    __u16 flags;
+    __builtin_memcpy(&flags, dns + 2, 2);
+    bool is_response = (flags & 0x8000) != 0;
+
+    if (!is_response) {
+        // Outbound DNS query (QR == 0).
+        if (dport == 53 && src_watched) {
+            // Record (client, server, port, txid) for TXID validation.
+            struct dns_txid_key k = {};
+            __builtin_memcpy(k.client_addr, src16, 16);
+            __builtin_memcpy(k.server_addr, dst16, 16);
+            k.client_port = sport;
+            k.server_port = dport;
+            k.txid = txid;
+            __u64 expiry = bpf_ktime_get_ns() + DNS_QUERY_TTL_NS;
+            bpf_map_update_elem(&dns_txid_lru, &k, &expiry, BPF_ANY);
+
+            // Also record in dns_outstanding for the existing volume check.
+            __u16 qtype = dns_parse_qtype(dns, data_end);
+            struct dns_query_key qk = {};
+            __builtin_memcpy(qk.client_addr, src16, 16);
+            qk.query_id = txid;
+            qk.qtype = qtype;
+            bpf_map_update_elem(&dns_outstanding, &qk, &expiry, BPF_ANY);
         }
-        struct dns_query_key k = {};
-        __builtin_memcpy(k.client_addr, src16, 16);
-        k.query_id = qid;
-        k.qtype = qtype;
-        __u64 expiry = bpf_ktime_get_ns() + DNS_QUERY_TTL_NS;
-        bpf_map_update_elem(&dns_outstanding, &k, &expiry, BPF_ANY);
         return 0;
     }
 
+    // Inbound DNS response (QR == 1).
     if (sport == 53 && dst_watched) {
-        // Inbound response toward a protected client — must be solicited.
-        __u16 qid = 0, qtype = 0;
-        if (dns + 2 <= data_end) {
-            __builtin_memcpy(&qid, dns, 2);
-            qtype = dns_parse_qtype(dns, data_end);
-        }
-        struct dns_query_key k = {};
+        // Must match an outstanding query: {client=dst, server=src,
+        // client_port=dport, server_port=sport, txid}.
+        struct dns_txid_key k = {};
         __builtin_memcpy(k.client_addr, dst16, 16);
-        k.query_id = qid;
-        k.qtype = qtype;
-        __u64 *expiry = bpf_map_lookup_elem(&dns_outstanding, &k);
+        __builtin_memcpy(k.server_addr, src16, 16);
+        k.client_port = dport;
+        k.server_port = sport;
+        k.txid = txid;
+        __u64 *expiry = bpf_map_lookup_elem(&dns_txid_lru, &k);
         __u64 now = bpf_ktime_get_ns();
         bool solicited = expiry && *expiry > now;
         if (!solicited) {
+            stat_add(INLINE_STAT_DNS_TXID_DROP, 1);
+            return XDP_DROP;
+        }
+        // Entry consumed — remove so a replayed response is dropped too.
+        bpf_map_delete_elem(&dns_txid_lru, &k);
+
+        // Existing solicited-response checks (dns_outstanding + volume).
+        __u16 qid = 0, qtype = 0;
+        __builtin_memcpy(&qid, dns, 2);
+        qtype = dns_parse_qtype(dns, data_end);
+        struct dns_query_key qk = {};
+        __builtin_memcpy(qk.client_addr, dst16, 16);
+        qk.query_id = qid;
+        qk.qtype = qtype;
+        __u64 *qexpiry = bpf_map_lookup_elem(&dns_outstanding, &qk);
+        bool q_solicited = qexpiry && *qexpiry > now;
+        if (!q_solicited) {
             stat_add(INLINE_STAT_DNS_DROPS, 1);
             return XDP_DROP;
         }
@@ -1445,6 +1480,50 @@ static __always_inline int dns_protect(const __u8 *src16, const __u8 *dst16,
             stat_add(INLINE_STAT_DNS_DROPS, 1);
             return XDP_DROP;
         }
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// UDP payload byte-offset signature match (Feature A).
+//
+// Loads up to 8 bytes from the UDP payload at sig->offset, applies
+// (val & sig->mask) == sig->pattern, and returns XDP_DROP on match.
+// Returns 0 (no verdict) when no signature is registered for the destination
+// or the payload cannot be read, letting the caller continue.
+// ---------------------------------------------------------------------------
+static __always_inline int udp_payload_sig_match(struct xdp_md *ctx,
+                                                 const __u8 *dst16, void *l4,
+                                                 void *data_end, void *data,
+                                                 __u32 pkt_len)
+{
+    if (!cfg_read(CFG_UDP_PAYLOAD_SIGS, 0))
+        return 0;
+
+    // UDP payload starts 8 bytes after the UDP header.
+    void *payload_start = l4 + 8;
+    if (payload_start + 8 > data_end)
+        return 0;
+
+    struct udp_payload_sig *sig = bpf_map_lookup_elem(&udp_payload_sigs, dst16);
+    if (!sig)
+        return 0;
+
+    // Bounds: offset + 8 must fit within the packet.
+    __u32 load_off = (__u32)(payload_start - data) + sig->offset;
+    if (load_off + 8 > pkt_len)
+        return 0;
+
+    __u64 val;
+    if (bpf_xdp_load_bytes(ctx, load_off, &val, 8) < 0)
+        return 0;
+
+    if ((val & sig->mask) == sig->pattern) {
+        if (sig->action == FILTER_ACTION_DROP) {
+            stat_add(INLINE_STAT_PAYLOAD_SIG_DROP, 1);
+            return XDP_DROP;
+        }
+        stat_add(INLINE_STAT_PAYLOAD_SIG_PASS, 1);
     }
     return 0;
 }
@@ -1756,6 +1835,16 @@ int xdp_inline(struct xdp_md *ctx)
         // ④ DNS reflection defense.
         if (cfg_read(CFG_DNS_PROTECT, 1) && l4_proto == IPPROTO_UDP && !is_frag) {
             int v = dns_protect(src16, dst16, src_watched, dst_watched, l4, data_end);
+            if (v)
+                return v;
+        }
+
+        // ⑤ UDP payload byte-offset signature (zero-day UDP floods without a
+        //    dominant source port). Checked after DNS defense so that
+        //    solicited DNS traffic is never dropped by a payload signature.
+        if (cfg_read(CFG_UDP_PAYLOAD_SIGS, 0) && l4_proto == IPPROTO_UDP && !is_frag &&
+            dst_watched) {
+            int v = udp_payload_sig_match(ctx, dst16, l4, data_end, data, pkt_len);
             if (v)
                 return v;
         }

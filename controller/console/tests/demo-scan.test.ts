@@ -4,7 +4,7 @@ import { resolve } from 'node:path'
 import { literals, scanSources, scanData, scanValue } from '../demo/scan.mjs'
 
 it('G2 data and source literals are safe across all backend GET routes', () => {
-  expect(scanData()).toEqual({ endpoints: 50, failures: [] })
+  expect(scanData()).toEqual({ endpoints: 59, failures: [] })
   expect(scanSources(resolve('demo'))).toEqual([])
 })
 it.each([

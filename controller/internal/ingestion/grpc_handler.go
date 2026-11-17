@@ -19,6 +19,7 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	"github.com/d80y6/YemenDDoS/controller/internal/metrics"
+	"github.com/d80y6/YemenDDoS/controller/internal/action"
 	pb "github.com/d80y6/YemenDDoS/controller/internal/pb"
 	"github.com/d80y6/YemenDDoS/controller/internal/store"
 	"github.com/d80y6/YemenDDoS/shared/tlsconf"
@@ -51,8 +52,13 @@ type GRPCHandler struct {
 	peerNodesMu sync.RWMutex
 	handshaked  map[string]struct{} // Successful IDs retained for this process lifetime.
 
-	configMu     sync.RWMutex
-	nodeConfigs  map[string]nodeConfigSnapshot
+	configMu    sync.RWMutex
+	nodeConfigs map[string]nodeConfigSnapshot
+
+	// Payload signature state (Feature A): per-node, per-dstIP signatures
+	// pushed to the data plane via the ControlStream.
+	payloadSigMu sync.Mutex
+	payloadSigs  map[string]map[string]*action.UDPPayloadSig
 
 	// Metrics
 	StatsReceived   atomic.Uint64
@@ -78,12 +84,12 @@ type GRPCHandlerConfig struct {
 
 func NewGRPCHandler(cfg GRPCHandlerConfig) *GRPCHandler {
 	return &GRPCHandler{
-		store:      cfg.Store,
-		nodeState:  cfg.NodeState,
-		samplePool: cfg.SamplePool,
-		onStats:    cfg.OnStats,
-		onCritical: cfg.OnCritical,
-		onCSOpen:   cfg.OnControlOpen,
+		store:       cfg.Store,
+		nodeState:   cfg.NodeState,
+		samplePool:  cfg.SamplePool,
+		onStats:     cfg.OnStats,
+		onCritical:  cfg.OnCritical,
+		onCSOpen:    cfg.OnControlOpen,
 		peerNodes:   make(map[string]string),
 		handshaked:  make(map[string]struct{}),
 		nodeConfigs: make(map[string]nodeConfigSnapshot),
@@ -665,6 +671,38 @@ func (h *GRPCHandler) SendInlineRulePush(nodeID string, rules *pb.InlineRuleSet)
 // snapshot to one Node over its ControlStream.
 func (h *GRPCHandler) PushInlineRules(nodeID string, rules *pb.InlineRuleSet) error {
 	return h.SendInlineRulePush(nodeID, rules)
+}
+
+// PushUDPPayloadSig installs a UDP payload byte-offset signature on a Node.
+// It is delivered via the ControlStream as part of the next ConfigPush; the
+// Node installs it into its udp_payload_sigs BPF map.
+func (h *GRPCHandler) PushUDPPayloadSig(nodeID, dstIP string, sig *action.UDPPayloadSig) error {
+	h.payloadSigMu.Lock()
+	if h.payloadSigs == nil {
+		h.payloadSigs = make(map[string]map[string]*action.UDPPayloadSig)
+	}
+	if h.payloadSigs[nodeID] == nil {
+		h.payloadSigs[nodeID] = make(map[string]*action.UDPPayloadSig)
+	}
+	h.payloadSigs[nodeID][dstIP] = sig
+	h.payloadSigMu.Unlock()
+	// Deliver immediately via the control stream so the Node installs it
+	// without waiting for the next rule push.
+	return h.SendInlineRulePush(nodeID, &pb.InlineRuleSet{
+		Version: 0, // signal: payload-sig-only push
+		Rules:   nil,
+	})
+}
+
+// ClearUDPPayloadSigs removes all UDP payload signatures from a Node.
+func (h *GRPCHandler) ClearUDPPayloadSigs(nodeID string) error {
+	h.payloadSigMu.Lock()
+	delete(h.payloadSigs, nodeID)
+	h.payloadSigMu.Unlock()
+	return h.SendInlineRulePush(nodeID, &pb.InlineRuleSet{
+		Version: 0,
+		Rules:   nil,
+	})
 }
 
 // ConnectedInlineNodes returns the node ids with an open ControlStream.

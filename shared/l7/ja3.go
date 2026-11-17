@@ -43,12 +43,10 @@ type TLSHandshake struct {
 // JA3 returns the JA3 pre-hash string ("769,47-53,0-11,...") per the
 // canonical definition, plus the md5 fingerprint.
 func (h TLSHandshake) JA3() (string, string) {
+	// JA3 canonical behavior uses the ClientHello legacy_version (not
+	// supported_versions). Bots that hardcode the record version are visible
+	// in the fingerprint distribution.
 	ver := h.Version
-	if h.SupportedVer != 0 {
-		// JA3 canonical behavior keeps the legacy record version; bots that
-		// hardcode it are visible in the fingerprint distribution.
-		ver = h.Version
-	}
 	ciphers := make([]string, 0, len(h.CipherSuites))
 	for _, c := range h.CipherSuites {
 		ciphers = append(ciphers, u16s(c))
@@ -114,8 +112,8 @@ func (h TLSHandshake) JA4() string {
 		sni = "i"
 	}
 
-	cipherCount := formatCount(cipherCountCaps(len(h.CipherSuites)))
-	extCount := formatCount(cipherCountCaps(len(h.Extensions)))
+	cipherCount := formatCount(countCap(len(h.CipherSuites)))
+	extCount := formatCount(countCap(len(h.Extensions)))
 
 	alpn := "00"
 	if len(h.ALPNs) > 0 {
@@ -197,8 +195,9 @@ func hex4Join(vals []uint16) string {
 	return strings.Join(parts, ",")
 }
 
-// cipherCountCaps caps the two-digit cipher count at "99" per FoxIO spec.
-func cipherCountCaps(n int) int {
+// countCap caps a two-digit count at "99" per FoxIO spec (used for both
+// cipher and extension counts in JA4_a / JA4_b).
+func countCap(n int) int {
 	if n > 99 {
 		return 99
 	}

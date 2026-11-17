@@ -35,6 +35,7 @@ interface Mitigation {
   Nodes: string[] | null
   Phase: string
   Rules: InlineRule[] | null
+  PayloadSig?: PayloadSig | null
   StartedAt: string
   NarrowedAt?: string
   PeakPPS: number
@@ -62,13 +63,24 @@ interface Posture {
   burst_alerts: number
   redirect_ok: number
   redirect_err: number
-  cpu_util?: number[] | null
+  dns_txid_drops?: number
+  payload_sig_drops?: number
+  payload_sig_pass?: number
   af_xdp_active: boolean
-  af_xdp_umem_drops: number
   af_xdp_rx: number
-  cpu_pins?: number[] | null
+  af_xdp_umem_drops: number
+  cpu_pins?: number[]
+  cpu_util?: number[]
   cleanpipe_egress?: string
   updated_at: string
+}
+
+interface PayloadSig {
+  Offset: number
+  Len: number
+  Pattern: string
+  Mask: string
+  Action: string
 }
 
 const data: MitigationsResponse = {
@@ -103,6 +115,8 @@ const inlineNodes = computed(() => nodes.value.filter(n => n.inline_enabled).len
 const totalRules = computed(() => nodes.value.reduce((sum, n) => sum + (n.filter_rules || 0), 0))
 const totalEmergency = computed(() => nodes.value.reduce((sum, n) => sum + (n.emergency_drops || 0), 0))
 const afxdpHealthy = computed(() => nodes.value.filter(n => n.af_xdp_active).length)
+const totalDnsTxidDrops = computed(() => nodes.value.reduce((sum, n) => sum + (n.dns_txid_drops || 0), 0))
+const totalPayloadSigDrops = computed(() => nodes.value.reduce((sum, n) => sum + (n.payload_sig_drops || 0), 0))
 
 async function reconcile() {
   busy.value = true
@@ -151,6 +165,10 @@ function phaseClass(phase: string) {
         :secondary="t('inline.kpiRulesHint')" />
       <XKpi :label="t('inline.kpiEmergency')" :value="thousands(totalEmergency)"
         :secondary="t('inline.kpiEmergencyHint')" />
+      <XKpi label="DNS TXID drops" :value="thousands(totalDnsTxidDrops)"
+        secondary="Unsolicited DNS responses dropped" />
+      <XKpi label="Payload sig drops" :value="thousands(totalPayloadSigDrops)"
+        secondary="UDP payload signature matches (XDP)" />
       <XKpi :label="t('inline.kpiAfxdp')" :value="`${afxdpHealthy}/${nodes.length}`"
         :secondary="t('inline.kpiAfxdpHint')" />
     </div>
@@ -186,6 +204,11 @@ function phaseClass(phase: string) {
               </td>
               <td>
                 <div v-for="(r, i) in (m.Rules || [])" :key="i" class="mono sub">{{ actionLabel(r) }}</div>
+                <div v-if="m.PayloadSig" class="mono sub payload-sig">
+                  sig @{{ m.PayloadSig.Offset }} len={{ m.PayloadSig.Len }}
+                  {{ m.PayloadSig.Pattern }}/{{ m.PayloadSig.Mask }}
+                  → {{ m.PayloadSig.Action }}
+                </div>
               </td>
               <td class="mono sub">{{ (m.Nodes || []).join(', ') || '—' }}</td>
               <td class="num sub">{{ fullDateTime(m.StartedAt) }}</td>
@@ -210,6 +233,7 @@ function phaseClass(phase: string) {
               <th>{{ t('inline.filterRules') }}</th>
               <th>{{ t('inline.synCookie') }}</th>
               <th>{{ t('inline.emergency') }}</th>
+              <th>DNS / Payload</th>
               <th>AF_XDP</th>
               <th>{{ t('inline.cpuPins') }}</th>
               <th>{{ t('inline.updated') }}</th>
@@ -233,6 +257,10 @@ function phaseClass(phase: string) {
                 <div class="sub num">{{ t('inline.alerts', { n: thousands(n.burst_alerts) }) }}</div>
                 <div class="sub num">{{ t('inline.redirect', { ok: thousands(n.redirect_ok ?? 0), err: thousands(n.redirect_err ?? 0) }) }}</div>
               </td>
+              <td class="num sub">
+                <div>TXID drop: <span class="mono">{{ thousands(n.dns_txid_drops ?? 0) }}</span></div>
+                <div>Sig drop/pass: <span class="mono">{{ thousands(n.payload_sig_drops ?? 0) }}/{{ thousands(n.payload_sig_pass ?? 0) }}</span></div>
+              </td>
               <td>
                 <span class="dot" :class="n.af_xdp_active ? 'ok' : 'neutral'" />
                 <span class="sub num">{{ thousands(n.af_xdp_rx) }}</span>
@@ -255,4 +283,5 @@ function phaseClass(phase: string) {
 <style scoped>
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 16px; }
 .panel + .panel { margin-top: 16px; }
+.payload-sig { color: var(--color-warning, #d97706); margin-top: 2px; }
 </style>

@@ -143,6 +143,35 @@ func PrefixKeyToIPNet(k PrefixKeyGo) net.IPNet {
 	return net.IPNet{IP: net.IP(k.Addr[:]), Mask: net.CIDRMask(ones, 128)}
 }
 
+// UDPPayloadSigKey mirrors the udp_payload_sigs map key: 16-byte destination
+// IP (IPv4 in the first four bytes).
+type UDPPayloadSigKey [16]byte
+
+// UDPPayloadSigValue mirrors struct udp_payload_sig in xsight.h.
+// Layout must match the C struct exactly: offset(1) + len(1) + action(1) +
+// pad(1) + 4-byte alignment gap + pattern(8) + mask(8) = 24 bytes.
+type UDPPayloadSigValue struct {
+	Offset  uint8
+	Len     uint8
+	Action  uint8
+	_       uint8
+	_pad    [4]byte
+	Pattern uint64
+	Mask    uint64
+}
+
+// DNSTXIDKey mirrors struct dns_txid_key in xsight.h.
+// Keyed on {client, server, client_port, server_port, txid} for matching
+// inbound DNS responses to outbound queries.
+type DNSTXIDKey struct {
+	ClientAddr  [16]byte
+	ServerAddr  [16]byte
+	ClientPort  uint16 // network byte order
+	ServerPort  uint16 // network byte order
+	TXID        uint16 // network byte order
+	_           uint16
+}
+
 // String returns the CIDR notation.
 func (p PrefixEntry) String() string {
 	return p.Net.String()

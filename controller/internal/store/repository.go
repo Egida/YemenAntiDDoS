@@ -636,6 +636,9 @@ type PosturePoint struct {
 	BurstAlerts         uint64    `json:"burst_alerts"`
 	RedirectOk          uint64    `json:"redirect_ok"`
 	RedirectErr         uint64    `json:"redirect_err"`
+	DnsTxidDrops        uint64    `json:"dns_txid_drops"`
+	PayloadSigDrops     uint64    `json:"payload_sig_drops"`
+	PayloadSigPass      uint64    `json:"payload_sig_pass"`
 	AFXDPActive         bool      `json:"af_xdp_active"`
 	AFXDPUmemDrops      uint64    `json:"af_xdp_umem_drops"`
 	AFXDPRX             uint64    `json:"af_xdp_rx"`

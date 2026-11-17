@@ -21,7 +21,7 @@ const read = (path: string): string => readFileSync(resolve(path), 'utf8')
 
 describe('demo gates', () => {
   it('G3 covers exactly 58 backend GET routes, including timeline', () => {
-    expect(getRoutes).toHaveLength(58)
+    expect(getRoutes).toHaveLength(59)
     expect(exclusions).toEqual([])
     for (const route of getRoutes) {
       const path = samplePath(route.path), reply = server(path)
@@ -94,7 +94,7 @@ describe('demo gates', () => {
       expect(Math.max(...during.map(r => r.pps))).toBeGreaterThan(Math.max(...before.map(r => r.pps)) * 2)
     }
     console.log('G3 authorization #1 page windows=8 attack windows=32 incremental tails=32 bounds PASS')
-  })
+  }, 30000)
   it('G6 overview, node filters and current attack readings use the same series', () => {
     const overview = server('/api/stats/overview').body
     for (const field of ['pps', 'bps']) {

@@ -27,6 +27,7 @@
 #define CFG_DNS_PROTECT      11 // UDP/DNS reflection defense master switch
 #define CFG_INLINE_SAMPLE    12 // inline-mode L7 sampling 1-in-N (0 = disabled)
 #define CFG_EGRESS_SADDR     13 // GRE outer source IPv4 (low 32 bits, network byte order)
+#define CFG_UDP_PAYLOAD_SIGS 14 // UDP payload signature engine master switch
 #define CFG_MAX              16 // xsight_config array size
 
 // Inline filter actions (mirrors proto InlineRule.action strings)
@@ -266,6 +267,52 @@ struct dns_volume_key {
     __u16 _pad;
 };
 
+// UDP payload byte-offset signature (zero-day UDP amplification without a
+// dominant src_port). Keyed by destination IP; matched against the first 64
+// bytes of UDP payload at the configured offset. Pattern/mask are little-endian
+// u64 words where bit i of mask selects byte i of the loaded 8-byte chunk and
+// pattern holds the expected byte values at those positions.
+struct udp_payload_sig {
+    __u8  offset;    // payload offset 0..56 (offset + len <= 64)
+    __u8  len;       // significant bytes 1..8 (rest of mask must be 0)
+    __u8  action;    // FILTER_ACTION_DROP or FILTER_ACTION_RATE_LIMIT
+    __u8  _pad0;
+    __u64 pattern;   // expected bytes (LSB = first byte)
+    __u64 mask;      // bitmask selecting which bytes to compare
+};
+
+// v4.0: dynamic UDP payload signature map (zero-day UDP floods without a
+// dominant source port). Controller installs signatures extracted from
+// ringbuf samples during the narrow phase; auto-withdrawn on rollback.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 4096);
+    __type(key, __u8[16]);        // destination IP (IPv4 in first 4 bytes)
+    __type(value, struct udp_payload_sig);
+} udp_payload_sigs SEC(".maps");
+
+// DNS TXID validation key: 5-tuple + transaction ID for matching inbound
+// DNS responses to outbound queries. Keyed on {client, server, client_port,
+// server_port, txid} so a response is only accepted if it matches a query
+// the client actually sent.
+struct dns_txid_key {
+    __u8  client_addr[16];    // IPv4 in first 4 bytes
+    __u8  server_addr[16];    // IPv4 in first 4 bytes
+    __u16 client_port;        // network byte order
+    __u16 server_port;        // network byte order
+    __u16 txid;               // network byte order
+    __u16 _pad;
+};
+
+// Tracked outbound DNS queries for TXID validation. Inbound responses with no
+// matching entry are dropped as unsolicited (DNS spoofing / Water Torture).
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 131072);
+    __type(key, struct dns_txid_key);
+    __type(value, __u64);     // expiry (ktime ns)
+} dns_txid_lru SEC(".maps");
+
 // Inline engine counters (inline_stats array indices)
 #define INLINE_STAT_COOKIE_REPLY     0
 #define INLINE_STAT_COOKIE_VALIDATED 1
@@ -277,6 +324,9 @@ struct dns_volume_key {
 #define INLINE_STAT_REDIRECT_ERR     7
 #define INLINE_STAT_XSK_STEER        8
 #define INLINE_STAT_FILTER_PASS      9
+#define INLINE_STAT_PAYLOAD_SIG_DROP 10  // udp_payload_sigs match -> DROP
+#define INLINE_STAT_PAYLOAD_SIG_PASS 11  // udp_payload_sigs match -> PASS (sampled)
+#define INLINE_STAT_DNS_TXID_DROP    12  // unsolicited DNS response (no TXID match)
 #define INLINE_STAT_MAX              16
 
 // Cookie engine input block (48 bytes = 6 u64 siphash words)
