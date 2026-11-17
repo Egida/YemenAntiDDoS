@@ -293,6 +293,12 @@ func (l *Listener) Start() error {
 	// Log receiver errors in background
 	go func() {
 		for err := range l.receiver.Errors() {
+			if err == nil {
+				continue
+			}
+			if strings.Contains(err.Error(), "use of closed network connection") {
+				continue
+			}
 			log.Printf("flow-receiver: %v", err)
 		}
 	}()

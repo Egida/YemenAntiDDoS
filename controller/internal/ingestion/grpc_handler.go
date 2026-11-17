@@ -51,12 +51,20 @@ type GRPCHandler struct {
 	peerNodesMu sync.RWMutex
 	handshaked  map[string]struct{} // Successful IDs retained for this process lifetime.
 
+	configMu     sync.RWMutex
+	nodeConfigs  map[string]nodeConfigSnapshot
+
 	// Metrics
 	StatsReceived   atomic.Uint64
 	StatsDropped    atomic.Uint64 // reports dropped due to processing queue full
 	SamplesReceived atomic.Uint64
 	EventsReceived  atomic.Uint64
 	EventsDropped   atomic.Uint64 // critical events dropped due to processing queue full
+}
+
+type nodeConfigSnapshot struct {
+	config  *pb.WatchConfig
+	version uint64
 }
 
 type GRPCHandlerConfig struct {
@@ -76,8 +84,9 @@ func NewGRPCHandler(cfg GRPCHandlerConfig) *GRPCHandler {
 		onStats:    cfg.OnStats,
 		onCritical: cfg.OnCritical,
 		onCSOpen:   cfg.OnControlOpen,
-		peerNodes:  make(map[string]string),
-		handshaked: make(map[string]struct{}),
+		peerNodes:   make(map[string]string),
+		handshaked:  make(map[string]struct{}),
+		nodeConfigs: make(map[string]nodeConfigSnapshot),
 	}
 }
 
@@ -188,22 +197,25 @@ func (h *GRPCHandler) Handshake(ctx context.Context, req *pb.NodeHandshake) (*pb
 		log.Printf("grpc: handshake build watch config: %v", err)
 		return &pb.HandshakeResponse{Accepted: false, RejectReason: fmt.Sprintf("internal error: %v", err)}, nil
 	}
-	// Update node mode from handshake (xdp nodes send "" or "xdp", flow nodes send "flow")
+	// Update node mode from handshake (xdp nodes send "" or "xdp", inline nodes "xdp_inline", flow nodes "flow")
 	mode := req.Mode
 	if mode == "" {
 		mode = "xdp"
 	}
-	if mode != "xdp" && mode != "flow" {
-		return &pb.HandshakeResponse{Accepted: false, RejectReason: fmt.Sprintf("invalid mode: %q (must be xdp or flow)", mode)}, nil
+	if mode != "xdp" && mode != "xdp_inline" && mode != "flow" {
+		return &pb.HandshakeResponse{Accepted: false, RejectReason: fmt.Sprintf("invalid mode: %q (must be xdp, xdp_inline or flow)", mode)}, nil
 	}
 	_ = h.store.Nodes().UpdateMode(ctx, req.NodeId, mode)
 
-	// Append per-node flow config (only for flow-mode nodes)
+	// Append per-node flow config (only for flow-mode nodes). Fail closed:
+	// a handshake without flow_listeners is applied by the node as a full
+	// replacement and would stop every running listener.
 	if mode == "flow" {
 		if err := h.appendFlowConfig(ctx, watchConfig, req.NodeId); err != nil {
-			log.Printf("grpc: handshake flow config for %s failed: %v", req.NodeId, err)
-			// Continue with handshake but without flow config — node will retry on next connect
+			log.Printf("grpc: handshake reject: flow config for %s: %v", req.NodeId, err)
+			return &pb.HandshakeResponse{Accepted: false, RejectReason: fmt.Sprintf("internal error: %v", err)}, nil
 		}
+	}
 	}
 
 	// If this node has never received a config publish (version=0),
@@ -231,6 +243,7 @@ func (h *GRPCHandler) Handshake(ctx context.Context, req *pb.NodeHandshake) (*pb
 	h.handshaked[req.NodeId] = struct{}{}
 	h.peerNodesMu.Unlock()
 	h.nodeState.NoteHandshake(req.NodeId, req.Interfaces)
+	h.setNodeConfig(req.NodeId, watchConfig, uint64(version))
 	return &pb.HandshakeResponse{
 		Accepted:               true,
 		WatchConfig:            watchConfig,
@@ -631,16 +644,21 @@ func (h *GRPCHandler) ControlStream(stream grpc.BidiStreamingServer[pb.ControlMe
 	}
 }
 
-// SendInlineRulePush delivers an inline filter snapshot to a Node without
-// disturbing its watch prefixes: the WatchConfig carries only inline_rules, so
-// the Node applies the rule table and leaves prefix/threshold state untouched.
+// SendInlineRulePush delivers an inline filter snapshot to a Node.
+// It merges inline rules into the node's last known full watch config so
+// prefix/threshold/flow state remains intact and delivery version tracking stays consistent.
 func (h *GRPCHandler) SendInlineRulePush(nodeID string, rules *pb.InlineRuleSet) error {
+	push := &pb.ConfigPush{WatchConfig: &pb.WatchConfig{InlineRules: rules}}
+	h.configMu.RLock()
+	snap, ok := h.nodeConfigs[nodeID]
+	h.configMu.RUnlock()
+	if ok && snap.config != nil {
+		wc := cloneNodeWatchConfig(snap.config)
+		wc.InlineRules = rules
+		push = &pb.ConfigPush{WatchConfig: wc, DeliveryVersionCurrent: snap.version}
+	}
 	return h.nodeState.SendControlMessage(nodeID, &pb.ControlMessage{
-		Payload: &pb.ControlMessage_ConfigPush{
-			ConfigPush: &pb.ConfigPush{
-				WatchConfig: &pb.WatchConfig{InlineRules: rules},
-			},
-		},
+		Payload: &pb.ControlMessage_ConfigPush{ConfigPush: push},
 	})
 }
 
@@ -667,6 +685,7 @@ func (h *GRPCHandler) AFXDPActive(nodeID string) bool {
 
 // SendConfigPush sends a ConfigPush to a specific node via its ControlStream.
 func (h *GRPCHandler) SendConfigPush(nodeID string, config *pb.WatchConfig, version uint64) error {
+	h.setNodeConfig(nodeID, config, version)
 	return h.nodeState.SendControlMessage(nodeID, &pb.ControlMessage{
 		Payload: &pb.ControlMessage_ConfigPush{
 			ConfigPush: &pb.ConfigPush{
@@ -675,4 +694,23 @@ func (h *GRPCHandler) SendConfigPush(nodeID string, config *pb.WatchConfig, vers
 			},
 		},
 	})
+}
+
+func (h *GRPCHandler) setNodeConfig(nodeID string, config *pb.WatchConfig, version uint64) {
+	h.configMu.Lock()
+	h.nodeConfigs[nodeID] = nodeConfigSnapshot{config: cloneNodeWatchConfig(config), version: version}
+	h.configMu.Unlock()
+}
+
+func cloneNodeWatchConfig(wc *pb.WatchConfig) *pb.WatchConfig {
+	if wc == nil {
+		return nil
+	}
+	return &pb.WatchConfig{
+		Prefixes:       wc.Prefixes,
+		HardThresholds: wc.HardThresholds,
+		FlowListeners:  wc.FlowListeners,
+		InlineRules:    wc.InlineRules,
+		Posture:        wc.Posture,
+	}
 }

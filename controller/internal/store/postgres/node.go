@@ -94,7 +94,8 @@ func (r *nodeRepo) UpdateDeliveryVersionCurrent(ctx context.Context, id string, 
 func (r *nodeRepo) UpdateACK(ctx context.Context, id string, versionApplied int64) error {
 	now := time.Now()
 	_, err := r.pool.Exec(ctx,
-		`UPDATE nodes SET delivery_version_applied=$1, config_status='synced',
+		`UPDATE nodes SET delivery_version_applied=$1,
+		 config_status=CASE WHEN $1 >= delivery_version_current THEN 'synced' ELSE 'pending' END,
 		 last_ack_at=$2, updated_at=$2
 		 WHERE id=$3`,
 		versionApplied, now, id)

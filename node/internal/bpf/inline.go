@@ -441,69 +441,107 @@ type InlineStats struct {
 // when the swap fails entirely (map updates are per-entry; a partial failure
 // keeps previously applied entries which the controller reconciles on the next
 // push).
+// ApplyInlineRules installs the authoritative filter snapshot. Rules are
+// upserted before any deletions: the filter tables are never emptied, so the
+// node never runs without a filter set (fail-safe). A partial failure leaves
+// the previous rules enforced and returns an error; the controller reconciles
+// on the next reconcile.
 func (m *Manager) ApplyInlineRules(specs []InlineRuleSpec, defaultAction string) error {
 	if m.Objs == nil {
 		return fmt.Errorf("bpf: not loaded")
 	}
 
-	// Clear both tables, then repopulate. Tables are small (controller-curated),
-	// so clear+fill beats diffing for determinism.
-	if err := clearExactMap(m.Objs.ActiveFilterRules); err != nil {
-		return fmt.Errorf("clear active_filter_rules: %w", err)
-	}
-	if err := clearMap(m.Objs.ActiveFilterSubnetsDst); err != nil {
-		return fmt.Errorf("clear active_filter_subnets_dst: %w", err)
-	}
-	if err := clearMap(m.Objs.ActiveFilterSubnetsSrc); err != nil {
-		return fmt.Errorf("clear active_filter_subnets_src: %w", err)
-	}
+	desiredRules := make(map[FilterRuleKey]struct{}, len(specs))
+	desiredSubnets := make(map[LPMKey]struct{}, len(specs))
 
-	// Install the catch-all before the snapshot rules: a controller-supplied
-	// global rule shares the same all-zero key and must win over the default.
-	if defaultAction == "drop" {
-		var key FilterRuleKey
-		val := FilterRule{Action: FilterActionDrop, Priority: ^uint32(0)}
-		if err := m.Objs.ActiveFilterRules.Update(&key, &val, ebpf.UpdateAny); err != nil {
-			return fmt.Errorf("install default-drop rule: %w", err)
-		}
-	} else if defaultAction != "" && defaultAction != "pass" {
-		log.Printf("inline: ignoring unknown default_action %q (treating as pass)", defaultAction)
-	}
-
-	applied := 0
+	// Upsert every desired rule first: tables are never emptied, so the node
+	// keeps enforcing the previous rule set if this push fails partway.
 	for _, spec := range specs {
 		switch ClassifyInlineRule(spec) {
 		case InlineRuleTargetSubnetDst, InlineRuleTargetSubnetSrc:
 			key, val, err := EncodeInlineSubnet(spec)
 			if err != nil {
-				log.Printf("inline: skip subnet rule %d: %v", spec.ID, err)
-				continue
+				return fmt.Errorf("encode subnet rule %d: %w", spec.ID, err)
 			}
 			subnets := m.Objs.ActiveFilterSubnetsDst
 			if ClassifyInlineRule(spec) == InlineRuleTargetSubnetSrc {
 				subnets = m.Objs.ActiveFilterSubnetsSrc
 			}
 			if err := subnets.Update(&key, &val, ebpf.UpdateAny); err != nil {
-				log.Printf("inline: subnet rule %d update: %v", spec.ID, err)
-				continue
+				return fmt.Errorf("update subnet rule %d: %w", spec.ID, err)
 			}
-			applied++
+			desiredSubnets[key] = struct{}{}
 		default:
 			key, val, err := EncodeInlineRule(spec)
 			if err != nil {
-				log.Printf("inline: skip rule %d: %v", spec.ID, err)
-				continue
+				return fmt.Errorf("encode rule %d: %w", spec.ID, err)
 			}
 			if err := m.Objs.ActiveFilterRules.Update(&key, &val, ebpf.UpdateAny); err != nil {
-				log.Printf("inline: rule %d update: %v", spec.ID, err)
-				continue
+				return fmt.Errorf("update rule %d: %w", spec.ID, err)
 			}
-			applied++
+			desiredRules[key] = struct{}{}
 		}
 	}
-	log.Printf("inline: applied %d/%d filter rules", applied, len(specs))
+
+	// Default action: catch-all rule on the all-zero key.
+	if defaultAction == "drop" {
+		var key FilterRuleKey
+		val := FilterRule{Action: FilterActionDrop, Priority: ^uint32(0)}
+		if err := m.Objs.ActiveFilterRules.Update(&key, &val, ebpf.UpdateAny); err != nil {
+			return fmt.Errorf("install default-drop rule: %w", err)
+		}
+		desiredRules[key] = struct{}{}
+	} else if defaultAction != "" && defaultAction != "pass" {
+		log.Printf("inline: ignoring unknown default_action %q (treating as pass)", defaultAction)
+	}
+
+	// Delete rules that are no longer desired. Deletions are applied last and
+	// failures are logged but not fatal: an undeleleted rule means
+	// over-filtering, never an empty table.
+	if err := pruneMap("active_filter_rules", m.Objs.ActiveFilterRules, desiredRules); err != nil {
+		return err
+	}
+	if err := pruneMap("active_filter_subnets_dst", m.Objs.ActiveFilterSubnetsDst, desiredSubnets); err != nil {
+		return err
+	}
+	if err := pruneMap("active_filter_subnets_src", m.Objs.ActiveFilterSubnetsSrc, desiredSubnets); err != nil {
+		return err
+	}
+
+	log.Printf("inline: applied %d/%d filter rules", len(desiredRules)+len(desiredSubnets), len(specs))
 	return nil
 }
+
+// pruneMap deletes every entry in mp whose key is not in desired. Deletion
+// failures are logged but not fatal: an undeleleted rule means
+// over-filtering, never an empty table.
+// pruneMap deletes every entry in mp whose key is not in desired. Keys are
+// collected before any deletion: cilium/ebpf's MapIterator is unsafe to
+// iterate while mutating the map. valueOut must be sized to
+// sizeof(struct filter_rule) (both filter maps share that value type); a
+// smaller buffer fails unmarshal with "doesn't consume all data".
+func pruneMap[K comparable](name string, mp *ebpf.Map, desired map[K]struct{}) error {
+	iter := mp.Iterate()
+	var key K
+	var val [48]byte // sizeof(struct filter_rule)
+	var stale []K
+	for iter.Next(&key, &val) {
+		if _, ok := desired[key]; !ok {
+			stale = append(stale, key)
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return fmt.Errorf("iterate %s: %w", name, err)
+	}
+	for _, k := range stale {
+		k := k
+		if err := mp.Delete(&k); err != nil {
+			return fmt.Errorf("delete entry from %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
 
 // clearExactMap clears a hash map keyed by FilterRuleKey.
 func clearExactMap(m *ebpf.Map) error {

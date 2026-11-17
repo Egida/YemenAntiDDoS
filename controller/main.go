@@ -506,6 +506,9 @@ func main() {
 		grpcTLS = tlsCfg
 		log.Println("tls: controller gRPC listener enabled (mTLS)")
 	}
+	if !cfg.TLS.Enabled && cfg.Auth.APIKey != "" {
+		log.Fatalf("auth: gRPC is plaintext but auth.api_key is set; enable tls.enabled for mutual TLS or clear auth.api_key")
+	}
 	grpcSrv := ingestion.NewServer(handler, grpcTLS)
 	go func() {
 		if err := grpcSrv.Serve(cfg.Listen.GRPC); err != nil {

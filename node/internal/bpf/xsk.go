@@ -151,10 +151,10 @@ type xdpRing struct {
 // or CPU reorder descriptor accesses past index publication on weakly ordered
 // targets (arm64); Go atomics provide the release/acquire ordering the kernel
 // expects (it uses smp_load_acquire/smp_store_release on the same fields).
-func (r *xdpRing) loadProducer() uint32   { return atomic.LoadUint32(r.producer) }
-func (r *xdpRing) loadConsumer() uint32   { return atomic.LoadUint32(r.consumer) }
-func (r *xdpRing) storeProducer(v uint32) { atomic.StoreUint32(r.producer, v) }
-func (r *xdpRing) storeConsumer(v uint32) { atomic.StoreUint32(r.consumer, v) }
+func (r *xdpRing) loadProducer() uint32   { if r.producer == nil { return 0 }; return atomic.LoadUint32(r.producer) }
+func (r *xdpRing) loadConsumer() uint32   { if r.consumer == nil { return 0 }; return atomic.LoadUint32(r.consumer) }
+func (r *xdpRing) storeProducer(v uint32) { if r.producer != nil { atomic.StoreUint32(r.producer, v) } }
+func (r *xdpRing) storeConsumer(v uint32) { if r.consumer != nil { atomic.StoreUint32(r.consumer, v) } }
 
 // XSKStats exposes socket health for the Node posture report.
 type XSKStats struct {

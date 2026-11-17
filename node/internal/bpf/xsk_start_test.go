@@ -21,9 +21,13 @@ func TestStartXSKInstallsManagerBeforeOpen(t *testing.T) {
 	defer func() { openXSKFn = old }()
 
 	var seen *XSKManager
+	var c uint32
 	openXSKFn = func(string, uint32, uint32, uint32, bool) (*XSK, error) {
 		seen = globalXSKManager
-		return &XSK{fd: fds[0]}, nil
+		// Stub socket: no rings are mapped, so hand Run a quiescent ring pair
+		// (consumer == producer). reapComp/drainRX then see an empty ring and
+		// exit cleanly when Close closes fd instead of dereferencing nil.
+		return &XSK{fd: fds[0], rx: xdpRing{consumer: &c, producer: &c}, comp: xdpRing{consumer: &c, producer: &c}}, nil
 	}
 
 	mgr, err := StartXSK(nil, "test0", 7, 0, 0, false, nil)

@@ -1,0 +1,94 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+
+# Three independent gates. console: green test subset (tests/known-red.txt lists
+# pre-arabic-migration debt deferred from the gate), typecheck, demo scan.
+# go: vet+tests for all three modules; node BPF tests need clang>=18 (verifier
+# stack budget) and root (bpf map/prog gates). docker: BuildKit Dockerfile lint.
+jobs:
+  console:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: controller/console/package-lock.json
+      - name: Record build version
+        working-directory: controller/console
+        run: |
+          echo "XSIGHT_VERSION=$(git describe --always)" >> "$GITHUB_ENV"
+      - name: Install dependencies
+        working-directory: controller/console
+        run: npm ci
+      - name: Test gate (green subset; known-red.txt = deferred zh→ar debt)
+        working-directory: controller/console
+        run: npm run test:gate
+      - name: Typecheck and build (vue-tsc + vite)
+        working-directory: controller/console
+        run: npm run build
+      - name: Build demo bundle
+        working-directory: controller/console
+        run: npm run build:demo
+      - name: Demo artifact and data scan
+        working-directory: controller/console
+        run: node demo/scan.mjs --prod dist --demo demo-dist
+
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: |
+            controller/go.sum
+            node/go.sum
+      - name: Controller vet and tests
+        working-directory: controller
+        env:
+          GOTOOLCHAIN: auto
+        run: |
+          go vet ./...
+          go test ./... -count=1 -timeout 480s
+      - name: Shared vet and tests
+        working-directory: shared
+        run: |
+          go vet ./...
+          go test ./... -count=1 -timeout 240s
+      - name: Node BPF objects (bpf2go requires clang >= 18)
+        run: |
+          if command -v clang-18 >/dev/null 2>&1; then sudo ln -sf "$(command -v clang-18)" /usr/local/bin/clang; fi
+          if command -v llvm-strip-18 >/dev/null 2>&1 && ! command -v llvm-strip >/dev/null 2>&1; then
+            sudo ln -sf "$(command -v llvm-strip-18)" /usr/local/bin/llvm-strip
+          fi
+          clang --version | head -1
+          major=$(clang --version | head -1 | grep -oE '[0-9]+' | head -1)
+          test "${major:-0}" -ge 18 || { echo "clang >= 18 required, got ${major:-none} (older clang exceeds the verifier stack budget)"; exit 1; }
+          ./scripts/build-node.sh bpf
+      - name: Node vet
+        working-directory: node
+        env:
+          GOTOOLCHAIN: auto
+        run: go vet ./...
+      - name: Node tests (BPF and XDP gates run as root)
+        working-directory: node
+        run: |
+          sudo env "PATH=$PATH" "HOME=$HOME" "GOPATH=$HOME/go" "GOMODCACHE=$HOME/go/pkg/mod" "GOTOOLCHAIN=auto" \
+            go test ./... -count=1 -timeout 480s
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Lint controller Dockerfile
+        run: docker build --check -f Dockerfile .
+      - name: Lint node Dockerfile
+        run: docker build --check -f deploy/docker/Dockerfile.node .

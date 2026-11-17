@@ -635,6 +635,11 @@ func (e *Engine) reconcileBGPWithdrawing(ctx context.Context, owned map[int]bool
 	}
 }
 
+// errSpeakerNotConfigured is the sentinel carried by the retry-announce warning
+// when the embedded speaker is not yet configured: it keeps the WARN's argument
+// list uniform (id, prefix, route_map, gen, err) for the log-shape contract.
+var errSpeakerNotConfigured = errors.New("speaker not configured")
+
 // retryBGPAnnounce re-originates a stuck announcement through the embedded speaker.
 // Startup retry failures retain announcing so runtime reconciliation can retry later.
 func (e *Engine) retryBGPAnnounce(ann store.BGPAnnouncement) {
@@ -647,7 +652,7 @@ func (e *Engine) retryBGPAnnounce(ann store.BGPAnnouncement) {
 	}
 	sp := bgp.Shared()
 	if sp == nil {
-		log.Printf("WARN action: retry announce announcement_id=%d prefix=%q route_map=%q gen=%d: speaker not configured; leaving announcing for runtime reconcile", ann.ID, ann.Prefix, ann.RouteMap, ann.Gen)
+		log.Printf("WARN action: retry announce announcement_id=%d prefix=%q route_map=%q gen=%d: %v; leaving announcing for runtime reconcile", ann.ID, ann.Prefix, ann.RouteMap, ann.Gen, errSpeakerNotConfigured)
 		return
 	}
 	// Kind-aware: a stuck flowspec row must re-install its stored rule, not a
@@ -659,7 +664,7 @@ func (e *Engine) retryBGPAnnounce(ann store.BGPAnnouncement) {
 		if rErr != nil {
 			// Leave the row announcing: a broadened fallback rule would not
 			// match the announced path.
-			log.Printf("WARN action: retry announce announcement_id=%d prefix=%q gen=%d: %v; leaving announcing for runtime reconcile", ann.ID, ann.Prefix, ann.Gen, rErr)
+			log.Printf("WARN action: retry announce announcement_id=%d prefix=%q route_map=%q gen=%d: %v; leaving announcing for runtime reconcile", ann.ID, ann.Prefix, ann.RouteMap, ann.Gen, rErr)
 			return
 		}
 		aErr = sp.AnnounceFlowspec(ctx, rule)

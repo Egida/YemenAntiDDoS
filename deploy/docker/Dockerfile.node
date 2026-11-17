@@ -27,10 +27,18 @@ RUN apt-get update \
  && ln -sf /usr/bin/llvm-strip-18 /usr/local/bin/llvm-strip \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
+# Cache module downloads separately from source changes.
+COPY shared/go.mod shared/go.mod
+COPY node/go.mod node/go.sum node/
+WORKDIR /src/node
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+WORKDIR /src
 COPY shared/ shared/
 COPY node/ node/
 WORKDIR /src/node
-RUN clang --version | head -1 \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    clang --version | head -1 \
  && go generate ./internal/bpf/ \
  && test -f internal/bpf/xsight_x86_bpfel.o \
  && CGO_ENABLED=0 go build -buildvcs=false -trimpath -o /out/xsight-node .
@@ -42,8 +50,6 @@ RUN apt-get update \
  && mkdir -p /etc/xsight/pki
 COPY --from=build /out/xsight-node /usr/local/bin/xsight-node
 
-# Flow-mode listeners (sFlow/NetFlow/IPFIX, configured in the Console) are
-# bound on the host network namespace — publish them with network_mode: host.
 VOLUME ["/etc/xsight"]
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/local/bin/xsight-node"]
