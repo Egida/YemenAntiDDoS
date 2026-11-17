@@ -17,11 +17,12 @@ After=network-online.target postgresql.service
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
 User=xsight
 Group=xsight
 WorkingDirectory=/opt/xsight/controller
 ExecStart=/opt/xsight/controller/bin/xsight-controller -config /opt/xsight/controller/config.yaml
+WatchdogSec=30
 
 # Restart policy
 Restart=on-failure

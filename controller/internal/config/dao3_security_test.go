@@ -15,6 +15,7 @@ func dao3Config(key string) *Config {
 	c.Action.Mode = "auto"
 	c.Detection.ExpiryFunction = "static"
 	c.Auth.APIKey = key
+	c.Auth.JWTSecret = "unique-jwt-secret-for-testing-123456789012345678901234"
 	c.Ring.MaxPointsPerIP = 120
 	c.Ring.MaxIPsPerPrefix = 1000
 	c.Ring.MaxGlobalKeys = 1000
@@ -59,7 +60,7 @@ func TestDao3_T3b_UniqueKeyAllowed(t *testing.T) {
 func dao3LoadConfig(t *testing.T, key string) (*Config, error) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "dao3-load-input.yml")
-	body := fmt.Sprintf("database:\n  dsn: unused\nauth:\n  api_key: %q\n", key)
+	body := fmt.Sprintf("database:\n  dsn: unused\nauth:\n  api_key: %q\n  jwt_secret: \"unique-jwt-secret-for-testing-123456789012345678901234\"\n", key)
 	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
 		t.Fatal(err)
 	}

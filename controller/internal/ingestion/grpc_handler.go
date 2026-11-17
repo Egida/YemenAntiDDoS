@@ -216,7 +216,6 @@ func (h *GRPCHandler) Handshake(ctx context.Context, req *pb.NodeHandshake) (*pb
 			return &pb.HandshakeResponse{Accepted: false, RejectReason: fmt.Sprintf("internal error: %v", err)}, nil
 		}
 	}
-	}
 
 	// If this node has never received a config publish (version=0),
 	// catch it up to the current max version so it can ACK and become synced.

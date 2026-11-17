@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"time"
 )
-
 // SnapshotPrefix is a single watched prefix from the Controller.
 type SnapshotPrefix struct {
 	Prefix string `json:"prefix"` // CIDR notation, e.g. "10.2.0.0/24"
@@ -72,8 +71,18 @@ func SaveSnapshot(nodeID string, snap *Snapshot) error {
 	if err := os.WriteFile(tmp, data, 0644); err != nil {
 		return fmt.Errorf("write snapshot: %w", err)
 	}
+	// fsync the temp file before rename so data hits durable storage
+	if f, err := os.Open(tmp); err == nil {
+		_ = f.Sync()
+		f.Close()
+	}
 	if err := os.Rename(tmp, path); err != nil {
 		return fmt.Errorf("rename snapshot: %w", err)
+	}
+	// fsync the directory so the rename is durable
+	if df, err := os.Open(dir); err == nil {
+		_ = df.Sync()
+		df.Close()
 	}
 	return nil
 }

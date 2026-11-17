@@ -521,7 +521,7 @@ func main() {
 	go configPub.RunDriftChecker(ctx)
 
 	// --- Phase 7: REST API ---
-	jwtSecret := cfg.Auth.APIKey + "-jwt" // derive JWT secret from API key
+	jwtSecret := cfg.Auth.JWTSecret
 	tlsFileCfg := tlsconf.FileConfig{
 		CAFile:           cfg.TLS.CAFile,
 		CertFile:         cfg.TLS.CertFile,

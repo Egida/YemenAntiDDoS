@@ -17,11 +17,12 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
 User=root
 Group=root
 WorkingDirectory=/opt/xsight/node
 ExecStart=/opt/xsight/node/bin/xsight-node -config /opt/xsight/node/config.yaml
+WatchdogSec=30
 
 # Restart policy
 Restart=on-failure

@@ -87,6 +87,7 @@ type LogConfig struct {
 
 type AuthConfig struct {
 	APIKey               string `yaml:"api_key"`
+	JWTSecret            string `yaml:"jwt_secret"`
 	InitialAdminPassword string `yaml:"initial_admin_password"`
 }
 
@@ -268,6 +269,9 @@ func (c *Config) validate() error {
 	}
 	if key := strings.TrimSpace(c.Auth.APIKey); key == "" || key == "CHANGE_ME" {
 		return fmt.Errorf(`auth.api_key is empty or still the default "CHANGE_ME"; set a unique value before starting`)
+	}
+	if secret := strings.TrimSpace(c.Auth.JWTSecret); secret == "" {
+		return fmt.Errorf(`auth.jwt_secret is required; set a unique signing key (generate with: openssl rand -hex 32)`)
 	}
 	if password := c.Auth.InitialAdminPassword; password != "" {
 		if password == "admin" || len(password) < 8 || len(password) > 72 {

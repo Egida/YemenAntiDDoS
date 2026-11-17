@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -85,6 +86,10 @@ func createXDropConnector(deps Dependencies) gin.HandlerFunc {
 			errResponse(c, http.StatusBadRequest, "api_url is required")
 			return
 		}
+		if u, err := url.ParseRequestURI(req.APIURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+			errResponse(c, http.StatusBadRequest, "api_url must be a valid http(s) URL")
+			return
+		}
 		if req.APIKey == "" {
 			errResponse(c, http.StatusBadRequest, "api_key is required")
 			return
@@ -156,6 +161,10 @@ func updateXDropConnector(deps Dependencies) gin.HandlerFunc {
 			conn.APIURL = strings.TrimRight(*req.APIURL, "/")
 			if conn.APIURL == "" {
 				errResponse(c, http.StatusBadRequest, "api_url is required")
+				return
+			}
+			if u, err := url.ParseRequestURI(conn.APIURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+				errResponse(c, http.StatusBadRequest, "api_url must be a valid http(s) URL")
 				return
 			}
 		}

@@ -22,7 +22,8 @@ database:
 
 auth:
   api_key: "CHANGE_ME"    # must be changed, the controller refuses to start with this value; REST API key (Header: X-API-Key). Generate with: openssl rand -hex 32
-                           # The JWT signing key is derived from it: changing it signs out every Web UI session.
+  jwt_secret: "CHANGE_ME_JWT"   # JWT signing key for Web UI sessions; must be changed before first startup; Generate with: openssl rand -hex 32
+                            # The JWT signing key signs Web UI sessions; changing it signs out every session.
   # Password of the first "admin" account. Required while the user table is empty (the controller
   # refuses to start without it) and for rotating a legacy default admin password; remove after use.
   # Set a unique password of 8 to 72 bytes (not "admin") before first startup.
